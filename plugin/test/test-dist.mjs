@@ -16,7 +16,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-rr-e2e-'));
 const toolsDir = path.join(tmp, 'tools');
 fs.mkdirSync(path.join(tmp, 'public'), { recursive: true });
 
-const relay = await startRelay({ port: 0, publicDir: path.join(tmp, 'public'), dataDir: path.join(tmp, 'data') });
+const relay = await startRelay({ port: 0, publicDir: path.join(tmp, 'public'), dataDir: path.join(tmp, 'data'), regToken: 'e2e-reg-token' });
 const RELAY_WS = `ws://127.0.0.1:${relay.port}/remote/ws`;
 const STEP = (n, msg) => console.log(`  [${n}] ${msg}`);
 
@@ -95,6 +95,7 @@ const hostCtx = {
 // ── 启动插件 ─────────────────────────────────────────────────────────────────
 apply(ctx, {
   relayUrl: RELAY_WS,
+  regToken: 'e2e-reg-token',   // 与 relay 侧一致：验证设备注册口令链路
   toolsDir,
   autoConnect: true,
   deviceName: '测试机 E2E',

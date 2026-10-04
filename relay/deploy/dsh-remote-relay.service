@@ -8,6 +8,8 @@ ExecStart=/usr/bin/node relay.mjs --port 8787
 Restart=always
 RestartSec=3
 User=www-data
+# 防蹭用：设置设备注册口令（与 dsh 面板里填写的一致）
+# Environment=RELAY_REG_TOKEN=换成随机口令
 
 [Install]
 WantedBy=multi-user.target

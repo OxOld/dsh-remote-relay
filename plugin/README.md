@@ -43,6 +43,7 @@ pnpm add dsh-remote-relay
 | `autoConnect` | true | 启动时自动连接中继 |
 | `approveFromPhone` | true | 允许手机批准工具调用（超时/离线自动回退桌面） |
 | `approvalTimeoutMs` | 120000 | 手机批准等待时长 |
+| `regToken` | 空 | 设备注册口令：中继设置了 `RELAY_REG_TOKEN` 时必填，防止他人蹭用你的服务器转发 |
 
 面板保存值持久化在 `~/.dsh/tools/remote-relay.json`，优先于 YAML config。
 

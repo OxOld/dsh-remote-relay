@@ -60,6 +60,7 @@ export function apply(ctx, rawConfig) {
     autoConnect: cfg.autoConnect ?? true,
     approveFromPhone: cfg.approveFromPhone ?? true,
     approvalTimeoutMs: cfg.approvalTimeoutMs ?? 120000,
+    regToken: cfg.regToken ?? '',   // 中继的设备注册口令（服务器设置 RELAY_REG_TOKEN 时必填）
   };
   try {
     if (fs.existsSync(cfgFilePath)) {
@@ -197,6 +198,7 @@ export function apply(ctx, rawConfig) {
     autoConnect: !!config.autoConnect,
     approveFromPhone: !!config.approveFromPhone,
     approvalTimeoutMs: config.approvalTimeoutMs,
+    regToken: config.regToken || '',
     error: lastError,
   });
 
@@ -223,6 +225,7 @@ export function apply(ctx, rawConfig) {
       lastError = '';
       client.sendText(JSON.stringify({
         type: 'hello', proto: PROTO, role: 'device', sid: config.sid, name: config.deviceName, hash: sha256b64(config.password),
+        ...(config.regToken ? { regToken: config.regToken } : {}),
       }));
     };
     client.onmessage = (data, isText) => {
@@ -609,6 +612,10 @@ export function apply(ctx, rawConfig) {
     if (typeof patch.autoConnect === 'boolean') config.autoConnect = patch.autoConnect;
     if (typeof patch.approveFromPhone === 'boolean') config.approveFromPhone = patch.approveFromPhone;
     if (Number.isFinite(patch.approvalTimeoutMs)) config.approvalTimeoutMs = Math.max(5000, Math.min(patch.approvalTimeoutMs, 600000));
+    if (typeof patch.regToken === 'string') {
+      const v = patch.regToken.trim();
+      if (v !== config.regToken) { config.regToken = truncate(v, 128); need = true; }
+    }
     if (patch.resetPairing === true) {
       config.sid = 'dsh-' + crypto.randomBytes(9).toString('hex');
       config.password = crypto.randomBytes(24).toString('base64url');

@@ -257,3 +257,49 @@ test('限速：同 IP 连续 10 次 proof 失败后 4003 冷却（放最后，�
   for (let i = 0; i < 40 && blockedCode === null; i++) await new Promise((r) => setTimeout(r, 50));
   assert.equal(blockedCode, 4003);
 });
+
+test('注册口令：新设备无 token 被拒（4001 reg-token-required），带 token 注册成功；已注册 sid 重连免 token', async () => {
+  const { startRelay } = await import('../relay.mjs');
+  const fs2 = await import('node:fs');
+  const os2 = await import('node:os');
+  const path2 = await import('node:path');
+  const dir = fs2.mkdtempSync(path2.join(os2.tmpdir(), 'dsh-rr-token-'));
+  fs2.mkdirSync(path2.join(dir, 'public'), { recursive: true });
+  const r2 = await startRelay({ port: 0, publicDir: path2.join(dir, 'public'), dataDir: path2.join(dir, 'data'), regToken: 'secret-token-123' });
+  const url2 = `ws://127.0.0.1:${r2.port}/remote/ws`;
+  const sid2 = 'token-device-01';
+  const pw = 'p'.repeat(32);
+  const h = crypto.createHash('sha256').update(pw, 'utf8').digest('base64url');
+  // 无 token 注册 → 4001 reg-token-required
+  const c1 = await connectJson(url2);
+  let cc = null; c1.ws.onclose = (x) => { cc = x; };   // error+close 同批到达，必须先挂 onclose
+  await c1.send({ type: 'hello', proto: PROTO, role: 'device', sid: sid2, name: 'x', hash: h });
+  const err = await c1.recv();
+  assert.equal(err.type, 'error');
+  assert.equal(err.code, 'reg-token-required');
+  for (let i = 0; i < 40 && cc === null; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(cc, 4001);
+  // 错 token → 同样拒绝
+  const c2 = await connectJson(url2);
+  await c2.send({ type: 'hello', proto: PROTO, role: 'device', sid: sid2, name: 'x', hash: h, regToken: 'wrong' });
+  const err2 = await c2.recv();
+  assert.equal(err2.code, 'reg-token-required');
+  c2.close(1000);
+  // 正确 token → 注册成功
+  const c3 = await connectJson(url2);
+  await c3.send({ type: 'hello', proto: PROTO, role: 'device', sid: sid2, name: 'x', hash: h, regToken: 'secret-token-123' });
+  const ch3 = await c3.recv();
+  assert.equal(ch3.type, 'challenge');
+  await c3.send({ type: 'proof', proof: proofOf(h, ch3.nonce, 'device', sid2) });
+  const ready3 = await c3.recv();
+  assert.equal(ready3.type, 'ready');
+  c3.close(1000);
+  // 已注册 sid 重连不需要 token
+  const c4 = await connectJson(url2);
+  await c4.send({ type: 'hello', proto: PROTO, role: 'device', sid: sid2, name: 'x', hash: h });
+  const ch4 = await c4.recv();
+  assert.equal(ch4.type, 'challenge');
+  c4.close(1000);
+  await r2.close();
+  try { fs2.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+});

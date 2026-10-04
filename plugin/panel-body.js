@@ -91,6 +91,7 @@ function rrmPaint() {
     f.autoConnect.checked = !!info.autoConnect;
     f.approveFromPhone.checked = !!info.approveFromPhone;
     f.approvalTimeoutMs.value = info.approvalTimeoutMs || 120000;
+    f.regToken.value = info.regToken || '';
   }
 }
 
@@ -152,6 +153,9 @@ function rrmBuildPanel() {
   f.deviceName = document.createElement('input');
   f.deviceName.type = 'text'; f.deviceName.placeholder = '例如：工作电脑';
   mk('设备名称（显示在二维码备注）', f.deviceName);
+  f.regToken = document.createElement('input');
+  f.regToken.type = 'text'; f.regToken.placeholder = '服务器未设置则留空';
+  mk('设备注册口令（服务器 RELAY_REG_TOKEN）', f.regToken);
   f.approvalTimeoutMs = document.createElement('input');
   f.approvalTimeoutMs.type = 'number'; f.approvalTimeoutMs.min = '5000'; f.approvalTimeoutMs.step = '1000';
   mk('手机批准超时（毫秒，超时后回退桌面处理）', f.approvalTimeoutMs);
@@ -180,6 +184,7 @@ function rrmBuildPanel() {
       autoConnect: !!f.autoConnect.checked,
       approveFromPhone: !!f.approveFromPhone.checked,
       approvalTimeoutMs: Number(f.approvalTimeoutMs.value) || 120000,
+      regToken: f.regToken.value.trim(),
     }, save);
   };
   f.appendChild(save);

@@ -39,7 +39,7 @@ proof = base64url( HMAC-SHA256( key = utf8(hash), msg = utf8(`${nonce}|${role}|$
 ### 1.1 握手时序（两个角色相同）
 
 ```
-C→S  {"type":"hello","proto":1,"role":"device","sid":"...","name":"...","hash":"..."}
+C→S  {"type":"hello","proto":1,"role":"device","sid":"...","name":"...","hash":"...","regToken":"..."}
 S→C  {"type":"challenge","nonce":"..."}
 C→S  {"type":"proof","proof":"..."}
 S→C  {"type":"ready","role":"device","sid":"...","peer":0}        # 0=对端未在线
@@ -49,6 +49,7 @@ S→C  {"type":"pair","status":"matched"}                            # 对端上
 
 - `hello.hash` 仅 device 携带。sid 未注册 → 用该 hash 注册；sid 已注册 → 先按**存量 hash**
   验 proof，通过后才允许用新 hash 覆盖（改密码无需换 sid）。
+- hello.regToken 仅 device 携带（可选）：中继配置了注册口令（RELAY_REG_TOKEN / --reg-token）时，**新 sid 注册必须携带匹配口令**，否则 4001 `reg-token-required` 并计入限速——防止知道域名的陌生人在中继上注册设备白嫖转发；已注册 sid 的重连不校验口令。
 - terminal 端凭 QR URL fragment 里的 hash 本地计算 proof，hash 不回传服务器。
 
 ### 1.2 关闭码

@@ -251,6 +251,10 @@ export function startRelay(opts = {}) {
   const tlsKey = opts.tlsKey ?? process.env.RELAY_TLS_KEY ?? '';
   const registry = new Registry(path.resolve(opts.dataDir ?? process.env.RELAY_DATA_DIR ?? path.join(__dirname, 'data'), 'devices.json'));
   const guard = new FailGuard();
+  // 注册口令：设置后，新设备（未注册的 sid）必须携带匹配的 regToken 才能注册，
+  // 防止知道域名的陌生人在此中继上白嫖转发。已注册设备的重连不受影响。
+  const regToken = String(opts.regToken ?? process.env.RELAY_REG_TOKEN ?? '');
+  if (!regToken) log('提示：未设置注册口令（--reg-token / RELAY_REG_TOKEN），任何人都可在此中继注册新设备免费使用转发');
 
   /** sid -> {device:WsConn|null, deviceMeta, terminal:WsConn|null} */
   const slots = new Map();
@@ -342,7 +346,15 @@ export function startRelay(opts = {}) {
         if (role === 'terminal' && !rec) { failClose(4004, 'sid-not-found'); return; }
         if (role === 'device') {
           if (!validHash(msg.hash)) { failClose(4001, 'bad-hash'); return; }
-                  if (!rec) registry.set(msg.sid, { hash: msg.hash, name: String(msg.name || '').slice(0, 64), ts: Date.now() });
+          if (!rec) {
+            // 新设备注册：配置了注册口令时必须携带正确的 regToken（防蹭中继）
+            if (regToken && !safeEqual(String(msg.regToken || ''), regToken)) {
+              guard.fail(ip);
+              failClose(4001, 'reg-token-required');
+              return;
+            }
+            registry.set(msg.sid, { hash: msg.hash, name: String(msg.name || '').slice(0, 64), ts: Date.now() });
+          }
         }
         info = { role, sid: msg.sid, name: String(msg.name || '').slice(0, 64), hash: msg.hash };
         stage = 'proof';
@@ -461,6 +473,7 @@ function main() {
     port: arg('--port') ?? undefined,
     tlsCert: arg('--tls-cert') ?? undefined,
     tlsKey: arg('--tls-key') ?? undefined,
+    regToken: arg('--reg-token') ?? undefined,
   }).catch((e) => { console.error('[relay] failed to start:', e.message); process.exit(1); });
 }
 
