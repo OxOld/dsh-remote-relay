@@ -1,0 +1,26 @@
+# dsh-remote-relay · 部署说明见 deploy/DEPLOY.zh.md
+# 默认 HTTP 8787（挂在已有 nginx/caddy 后面）；直接 HTTPS 见文件底部注释。
+services:
+  relay:
+    build: .
+    image: dsh-remote-relay
+    container_name: dsh-remote-relay
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      # 防蹭用（必填）：设备注册口令，与 dsh 面板"设备注册口令"一致。
+      # 用法：cp .env.example .env 后修改 .env
+      - RELAY_REG_TOKEN=${RELAY_REG_TOKEN:?请先 cp .env.example .env 并设置口令}
+    volumes:
+      - ./data:/app/data    # 设备注册表持久化（删除该目录 = 全部设备重新配对）
+
+# ── 直接 HTTPS（不需要 nginx 时）──
+# 1) 证书放 ./certs/fullchain.pem 与 ./certs/privkey.pem
+# 2) 上面 ports 换成：      - "443:443"
+# 3) environment 增加：
+#      - RELAY_TLS_CERT=/certs/fullchain.pem
+#      - RELAY_TLS_KEY=/certs/privkey.pem
+# 4) volumes 增加：         - ./certs:/certs:ro
+# 5) Dockerfile 的 HEALTHCHECK 换成：
+#      CMD wget --no-check-certificate -qO- "https://127.0.0.1:${RELAY_PORT}/healthz" || exit 1

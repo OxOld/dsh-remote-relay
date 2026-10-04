@@ -22,7 +22,8 @@ docs/PROTOCOL.md        三方协议契约（relay/UI 只按它实现，永不 i
 docs/DESIGN.zh.md       架构决策记录（为什么弃用全量代理）
 relay/relay.mjs         中继服务（单文件，零依赖，Node ≥ 20）
 relay/public/           轻量移动端 UI（无构建，原生 ES modules）
-relay/deploy/           部署文档 + systemd + Dockerfile
+relay/Dockerfile 等     Dockerfile + docker-compose.yml + .env.example
+relay/deploy/           部署文档 + systemd 样例
 plugin/                 dsh 插件（npm 包 dsh-remote-relay）
 plugin/lib/index.mjs    cordis 插件主体
 plugin/lib/projector.mjs 会话事件 → 远程消息投影器（纯函数）

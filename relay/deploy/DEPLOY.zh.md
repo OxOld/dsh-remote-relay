@@ -90,13 +90,16 @@ WantedBy=multi-user.target
 systemctl daemon-reload && systemctl enable --now dsh-remote-relay
 ```
 
-## 4. 可选：Docker
+## 4. Docker Compose（在 relay/ 目录下）
 
 ```bash
-docker build -t dsh-remote-relay .
-docker run -d --name dsh-remote-relay --restart always \
-  -p 8787:8787 -v /opt/dsh-remote-relay/data:/app/data dsh-remote-relay
+cp .env.example .env       # 编辑 .env，设置设备注册口令（防蹭用，必填）
+docker compose up -d --build
 ```
+
+- 镜像零依赖极小；`./data` 挂载持久化设备注册表（删除 = 全部设备重新配对）；
+- 默认监听 8787（HTTP，挂 nginx/caddy 后面）；直接 HTTPS（免 nginx）的改法见 docker-compose.yml 底部注释；
+- 更新版本：拉取新代码后 `docker compose up -d --build`。
 
 ## 5. dsh 插件侧配置
 

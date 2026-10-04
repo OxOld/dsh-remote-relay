@@ -4,6 +4,9 @@ node_modules/
 # 运行时数据（中继的设备注册表）
 relay/data/
 
+# 密钥/口令
+.env
+
 # 日志与临时文件
 *.log
 *.tmp
