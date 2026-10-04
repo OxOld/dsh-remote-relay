@@ -1,0 +1,271 @@
+// ──────────── 极简 QR 码生成器（纯 JS，byte 模式，EC 等级 M，版本 1-40）────────────
+// 依据 ISO/IEC 18004；算法参考 Project Nayuki qrcodegen（MIT）
+var QR_M_ECC = [10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28];
+var QR_M_BLOCKS = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49];
+var QR_EXP = [], QR_LOG = [];
+(function () {
+  var x = 1;
+  for (var i = 0; i < 255; i++) { QR_EXP[i] = x; QR_LOG[x] = i; x <<= 1; if (x & 256) x ^= 285; }
+  for (var j = 255; j < 512; j++) QR_EXP[j] = QR_EXP[j - 255];
+})();
+function qrGfMul(a, b) { return (a === 0 || b === 0) ? 0 : QR_EXP[QR_LOG[a] + QR_LOG[b]]; }
+// 生成多项式（低次在前，末项恒为 1）
+function qrRsGenPoly(degree) {
+  var g = [1];
+  for (var i = 0; i < degree; i++) {
+    var ng = [];
+    for (var j = 0; j <= g.length; j++) ng.push(0);
+    for (var k = 0; k < g.length; k++) {
+      ng[k] ^= qrGfMul(g[k], QR_EXP[i]);
+      ng[k + 1] ^= g[k];
+    }
+    g = ng;
+  }
+  return g;
+}
+// 余数计算：data 高次在前；返回长度 degree 的余数（低次在前）
+function qrRsRemainder(data, gen) {
+  var d = gen.length - 1;
+  var reg = [];
+  for (var i = 0; i < d; i++) reg.push(0);
+  for (var i = 0; i < data.length; i++) {
+    var fb = data[i] ^ reg[d - 1];
+    for (var j = d - 1; j >= 1; j--) reg[j] = reg[j - 1] ^ qrGfMul(gen[j], fb);
+    reg[0] = qrGfMul(gen[0], fb);
+  }
+  return reg;
+}
+function qrRawModules(ver) {
+  var result = (16 * ver + 128) * ver + 64;
+  if (ver >= 2) {
+    var numAlign = Math.floor(ver / 7) + 2;
+    result -= (25 * numAlign - 10) * numAlign - 55;
+    if (ver >= 7) result -= 36;
+  }
+  return result;
+}
+function qrAlignPositions(ver) {
+  if (ver === 1) return [];
+  var numAlign = Math.floor(ver / 7) + 2;
+  var step = (ver === 32) ? 26 : Math.ceil((ver * 4 + 4) / (numAlign * 2 - 2)) * 2;
+  var result = [6];
+  for (var pos = ver * 4 + 10; result.length < numAlign; pos -= step) result.splice(1, 0, pos);
+  return result;
+}
+function frprmQr(text) {
+  var utf8 = unescape(encodeURIComponent(text));
+  var data = [];
+  for (var i = 0; i < utf8.length; i++) data.push(utf8.charCodeAt(i));
+  // 选最小版本（EC 等级 M）
+  var version = -1, dataCodewords = 0;
+  for (var v = 1; v <= 40; v++) {
+    var total = Math.floor(qrRawModules(v) / 8);
+    var dc = total - QR_M_ECC[v - 1] * QR_M_BLOCKS[v - 1];
+    var countBits = v < 10 ? 8 : 16;
+    if (4 + countBits + data.length * 8 <= dc * 8) { version = v; dataCodewords = dc; break; }
+  }
+  if (version < 0) throw new Error('QR data too long');
+  // 比特流：模式 0100 + 长度 + 数据 + 终止 + 填充
+  var bits = [];
+  function push(val, n) { for (var i = n - 1; i >= 0; i--) bits.push((val >>> i) & 1); }
+  push(4, 4);
+  push(data.length, version < 10 ? 8 : 16);
+  for (var i = 0; i < data.length; i++) push(data[i], 8);
+  var cap = dataCodewords * 8;
+  push(0, Math.min(4, cap - bits.length));
+  while (bits.length % 8 !== 0) bits.push(0);
+  var pads = [236, 17], pi = 0;
+  while (bits.length < cap) { push(pads[pi], 8); pi ^= 1; }
+  var dataCw = [];
+  for (var i = 0; i < bits.length; i += 8) {
+    var b = 0;
+    for (var j = 0; j < 8; j++) b = (b << 1) | bits[i + j];
+    dataCw.push(b);
+  }
+  // ECC + 块间交织
+  var numBlocks = QR_M_BLOCKS[version - 1];
+  var blockEcc = QR_M_ECC[version - 1];
+  var rawCodewords = Math.floor(qrRawModules(version) / 8);
+  var numShort = numBlocks - rawCodewords % numBlocks;
+  var shortLen = Math.floor(rawCodewords / numBlocks);
+  var gen = qrRsGenPoly(blockEcc);
+  var blocks = [];
+  var k = 0;
+  for (var i = 0; i < numBlocks; i++) {
+    var datLen = shortLen - blockEcc + (i < numShort ? 0 : 1);
+    var dat = dataCw.slice(k, k + datLen);
+    k += datLen;
+    var ecc = qrRsRemainder(dat, gen).slice().reverse();
+    var blk = dat.slice();
+    if (i < numShort) blk.push(0);
+    blocks.push(blk.concat(ecc));
+  }
+  var allCw = [];
+  for (var i = 0; i < blocks[0].length; i++) {
+    for (var j = 0; j < blocks.length; j++) {
+      if (i === shortLen - blockEcc && j < numShort) continue;
+      allCw.push(blocks[j][i]);
+    }
+  }
+  // 矩阵与功能图形
+  var size = version * 4 + 17;
+  var mod = [], isFn = [];
+  for (var y = 0; y < size; y++) {
+    mod.push([]); isFn.push([]);
+    for (var x = 0; x < size; x++) { mod[y].push(false); isFn[y].push(false); }
+  }
+  function setFn(x, y, dark) { mod[y][x] = dark; isFn[y][x] = true; }
+  function drawFinder(cx, cy) {
+    for (var dy = -4; dy <= 4; dy++) {
+      for (var dx = -4; dx <= 4; dx++) {
+        var x = cx + dx, y = cy + dy;
+        if (x < 0 || x >= size || y < 0 || y >= size) continue;
+        var dist = Math.max(Math.abs(dx), Math.abs(dy));
+        setFn(x, y, dist !== 2 && dist !== 4);
+      }
+    }
+  }
+  for (var i = 0; i < size; i++) { setFn(6, i, i % 2 === 0); setFn(i, 6, i % 2 === 0); }
+  drawFinder(3, 3); drawFinder(size - 4, 3); drawFinder(3, size - 4);
+  var align = qrAlignPositions(version);
+  for (var i = 0; i < align.length; i++) {
+    for (var j = 0; j < align.length; j++) {
+      if ((i === 0 && j === 0) || (i === 0 && j === align.length - 1) || (i === align.length - 1 && j === 0)) continue;
+      for (var dy = -2; dy <= 2; dy++) {
+        for (var dx = -2; dx <= 2; dx++) {
+          setFn(align[j] + dx, align[i] + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+        }
+      }
+    }
+  }
+  function getBit(x, i) { return ((x >>> i) & 1) !== 0; }
+  function drawFormat(mask) {
+    var fm = 0; // M 级格式位 = 00
+    var d = (fm << 3) | mask;
+    var rem = d;
+    for (var i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 1335); // 0x537
+    var fb = ((d << 10) | rem) ^ 21522; // 0x5412
+    for (var i = 0; i <= 5; i++) setFn(8, i, getBit(fb, i));
+    setFn(8, 7, getBit(fb, 6));
+    setFn(8, 8, getBit(fb, 7));
+    setFn(7, 8, getBit(fb, 8));
+    for (var i = 9; i < 15; i++) setFn(14 - i, 8, getBit(fb, i));
+    for (var i = 0; i < 8; i++) setFn(size - 1 - i, 8, getBit(fb, i));
+    for (var i = 8; i < 15; i++) setFn(8, size - 15 + i, getBit(fb, i));
+    setFn(8, size - 8, true);
+  }
+  drawFormat(0); // 先占位
+  if (version >= 7) {
+    var rem2 = version;
+    for (var i = 0; i < 12; i++) rem2 = (rem2 << 1) ^ ((rem2 >>> 11) * 7973); // 0x1F25
+    var vb = (version << 12) | rem2;
+    for (var i = 0; i < 18; i++) {
+      var color = getBit(vb, i);
+      var a = size - 11 + i % 3;
+      var b = Math.floor(i / 3);
+      setFn(a, b, color);
+      setFn(b, a, color);
+    }
+  }
+  // 数据蛇形填充
+  var bi = 0;
+  for (var right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (var vert = 0; vert < size; vert++) {
+      for (var j = 0; j < 2; j++) {
+        var x = right - j;
+        var upward = ((right + 1) & 2) === 0;
+        var y = upward ? size - 1 - vert : vert;
+        if (!isFn[y][x] && bi < allCw.length * 8) {
+          mod[y][x] = getBit(allCw[bi >>> 3], 7 - (bi & 7));
+          bi++;
+        }
+      }
+    }
+  }
+  // 掩码选择（全量评估 8 种）
+  function maskCond(m, x, y) {
+    switch (m) {
+      case 0: return (x + y) % 2 === 0;
+      case 1: return y % 2 === 0;
+      case 2: return x % 3 === 0;
+      case 3: return (x + y) % 3 === 0;
+      case 4: return (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
+      case 5: return (x * y) % 2 + (x * y) % 3 === 0;
+      case 6: return ((x * y) % 2 + (x * y) % 3) % 2 === 0;
+      default: return ((x + y) % 2 + (x * y) % 3) % 2 === 0;
+    }
+  }
+  function applyMask(m) {
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        if (!isFn[y][x] && maskCond(m, x, y)) mod[y][x] = !mod[y][x];
+      }
+    }
+  }
+  function penalty() {
+    var score = 0;
+    // 规则1：行/列同色连续 ≥5
+    for (var y = 0; y < size; y++) {
+      var run = 1;
+      for (var x = 1; x <= size; x++) {
+        if (x < size && mod[y][x] === mod[y][x - 1]) run++;
+        else { if (run >= 5) score += 3 + (run - 5); run = 1; }
+      }
+    }
+    for (var x = 0; x < size; x++) {
+      var run = 1;
+      for (var y = 1; y <= size; y++) {
+        if (y < size && mod[y][x] === mod[y - 1][x]) run++;
+        else { if (run >= 5) score += 3 + (run - 5); run = 1; }
+      }
+    }
+    // 规则2：2x2 同色块
+    for (var y = 0; y < size - 1; y++) {
+      for (var x = 0; x < size - 1; x++) {
+        var c = mod[y][x];
+        if (c === mod[y][x + 1] && c === mod[y + 1][x] && c === mod[y + 1][x + 1]) score += 3;
+      }
+    }
+    // 规则3：定位图形 00001011101 / 10111010000
+    var p1 = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1];
+    function matchAt(arr, start, rev) {
+      for (var i = 0; i < 11; i++) {
+        var v = rev ? p1[10 - i] : p1[i];
+        var got = arr[start + i] ? 1 : 0;
+        if (got !== v) return false;
+      }
+      return true;
+    }
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x + 11 <= size; x++) {
+        if (matchAt(mod[y], x, false) || matchAt(mod[y], x, true)) score += 40;
+      }
+    }
+    for (var x = 0; x < size; x++) {
+      var col = [];
+      for (var y = 0; y < size; y++) col.push(mod[y][x]);
+      for (var y = 0; y + 11 <= size; y++) {
+        if (matchAt(col, y, false) || matchAt(col, y, true)) score += 40;
+      }
+    }
+    // 规则4：暗色比例
+    var dark = 0;
+    for (var y = 0; y < size; y++) for (var x = 0; x < size; x++) if (mod[y][x]) dark++;
+    var pct = dark * 100 / (size * size);
+    score += Math.floor(Math.abs(pct - 50) / 5) * 10;
+    return score;
+  }
+  var bestMask = 0, bestScore = -1;
+  for (var m = 0; m < 8; m++) {
+    applyMask(m);
+    drawFormat(m);
+    var sc = penalty();
+    if (bestScore < 0 || sc < bestScore) { bestScore = sc; bestMask = m; }
+    applyMask(m); // 再异或一次还原
+  }
+  applyMask(bestMask);
+  drawFormat(bestMask);
+  return { version: version, size: size, modules: mod };
+}
+`;

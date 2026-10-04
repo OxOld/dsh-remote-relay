@@ -1,0 +1,13 @@
+[Unit]
+Description=dsh-remote-relay
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/dsh-remote-relay
+ExecStart=/usr/bin/node relay.mjs --port 8787
+Restart=always
+RestartSec=3
+User=www-data
+
+[Install]
+WantedBy=multi-user.target

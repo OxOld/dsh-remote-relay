@@ -1,0 +1,6 @@
+# dsh-remote-relay 的 cordis patch：向 profile 声明本插件实例
+# 安装方式：把本包放进 profile 的 node_modules（或 pnpm add），并在
+# profile 的 cordis.patch.yml / dsh.profile.bundles 引用本 patch。
+- insert:
+    id: remote-relay
+    name: dsh-remote-relay

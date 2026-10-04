@@ -1,0 +1,34 @@
+{
+  "name": "dsh-remote-relay",
+  "version": "0.1.0",
+  "description": "DSH 远程控制插件（中继版）：对标 ZCode 远程控制 —— 轻量手机 UI 托管在自有服务器的中继上，dsh 插件出站连接中继，隧道只传消息增量；支持远程查看/续写会话、流式输出、手机批准工具调用、附件按需拉取。",
+  "type": "module",
+  "main": "lib/index.mjs",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:panel": "node build-panel.mjs",
+    "test": "node --check lib/index.mjs && node --check lib/ws.mjs && node --check lib/projector.mjs && node --check lib/panel.mjs && node --test test/projector.test.mjs && node test/test-dist.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "remote-control",
+    "relay",
+    "mobile"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
