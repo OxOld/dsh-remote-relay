@@ -38,7 +38,7 @@ function rrmEl(tag, cls, text) {
   return n;
 }
 
-var rrmPanel = null, rrmFab = null, rrmTimer = null, rrmInfo = null, rrmOpen = false;
+var rrmPanel = null, rrmFab = null, rrmTimer = null, rrmInfo = null, rrmOpen = false, rrmLastSaveAt = 0;
 
 function rrmApi(path, opts) {
   return fetch('/remote-relay/' + path, opts).then(function (r) { return r.json(); });
@@ -72,6 +72,7 @@ function rrmPaint() {
     if (!info.configured) st.innerHTML = '<span class="rrm-dots"></span>未配置中继，请在下方填写';
     else if (info.connected && info.terminal) st.innerHTML = '<span class="rrm-dots on"></span>手机已连接';
     else if (info.connected) st.innerHTML = '<span class="rrm-dots on"></span>已连接中继，等待手机扫码';
+    else if (Date.now() - rrmLastSaveAt < 8000) st.innerHTML = '<span class="rrm-dots"></span>已保存，正在重连中继…';
     else st.innerHTML = '<span class="rrm-dots"></span>未连接：' + (info.error || '请检查中继地址');
   }
   var qrWrap = rrmPanel.querySelector('#rrm-qr');
@@ -105,7 +106,7 @@ function rrmSave(patch, btn) {
   }).then(function (r) {
     if (btn) { btn.disabled = false; }
     if (!r.ok) alert('保存失败：' + (r.error || '未知错误'));
-    else rrmRefresh();
+    else { rrmLastSaveAt = Date.now(); rrmFastPoll(); }
     return r;
   }).catch(function (e) {
     if (btn) btn.disabled = false;
@@ -238,6 +239,20 @@ function rrmRefresh() {
   rrmApi('info').then(function (r) {
     if (r && r.ok) { rrmInfo = r; rrmPaint(); }
   }).catch(function () { /* dsh 未就绪时忽略 */ });
+}
+
+// 保存/重置后快速轮询：重连握手通常 1-3s，每 650ms 查一次，8s 后回到常规节奏
+function rrmFastPoll() {
+  rrmRefresh();
+  clearInterval(rrmTimer);
+  var n = 0;
+  rrmTimer = setInterval(function () {
+    rrmRefresh();
+    if (++n >= 12) {
+      clearInterval(rrmTimer);
+      rrmTimer = rrmOpen ? setInterval(rrmRefresh, 2500) : null;
+    }
+  }, 650);
 }
 
 function rrmBoot() {

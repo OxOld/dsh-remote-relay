@@ -13,3 +13,6 @@ relay/data/
 
 # ZCode 工作区产物
 .zcode/
+
+# 本地部署用 compose（不入库，桌面另有副本）
+relay/deploy/docker-compose-ccr.yml
