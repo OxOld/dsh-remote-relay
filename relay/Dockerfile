@@ -1,7 +1,7 @@
-# dsh-remote-relay · 零依赖单文件中继，镜像极小（~60MB）
+# dsh-remote-relay · 零依赖中继（relay.mjs + full.mjs），镜像极小（~60MB）
 FROM node:22-alpine
 WORKDIR /app
-COPY relay.mjs ./
+COPY relay.mjs full.mjs ./
 COPY public ./public
 # data/ 为设备注册表持久化目录，挂卷时由宿主持有
 RUN mkdir -p /app/data && chown -R node:node /app
