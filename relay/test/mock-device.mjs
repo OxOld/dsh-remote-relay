@@ -17,7 +17,7 @@ ws.onmessage = (data) => {
     ws.sendText(JSON.stringify({ type: 'proof', proof }));
     return;
   }
-  if (msg.type === 'ready') console.log('device ready, peer:', msg.peer);
+  if (msg.type === 'ready') { console.log('device ready, peer:', msg.peer); ws.sendText(JSON.stringify({ type: 'data', payload: { type: 'full-info' } })); }
   if (msg.type === 'pair') console.log('pair:', msg.status);
   if (msg.type === 'data') void handle(msg.payload);
 };
@@ -34,6 +34,7 @@ const sessions = [
 ];
 
 async function handle(p) {
+  if (p.type && handleFull(p)) return;   // 完整模式帧优先
   if (p.c === 'bootstrap-request') {
     ws.sendText(JSON.stringify({ type: 'data', payload: { c: 'bootstrap', sessions, device: { name: '演示机', version: 'mock' } } }));
   } else if (p.c === 'open') {
@@ -69,6 +70,94 @@ async function handle(p) {
     ws.sendText(JSON.stringify({ type: 'data', payload: { c: 'att-end', fetchId: p.fetchId, sha8: crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 8) } }));
   }
 }
+
+// ── 完整模式（模拟官方 UI）：资产推送 + HTTP/WS 桥接应答 ────────────────────────
+const demoIndex = [
+  '<!doctype html><html><head>',
+  '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1" />',
+  '<title>DSH 完整模式（mock 官方 UI）</title>',
+  '<link href="/manifest.webmanifest" rel="manifest">',
+  '<script>globalThis["__DSH_BOOT__"] = {"mock":true,"served":"完整模式桥接演示"}</script>',
+  '<link rel="stylesheet" href="/assets/app-1.css">',
+  '<script src="./assets/app-1.js"></script>',
+  '</head><body><div id="root"></div></body></html>',
+].join('');
+const demoCss = 'body{font-family:system-ui;background:#0f1115;color:#e6e8ee;display:grid;place-items:center;height:100vh;margin:0}main{max-width:520px;padding:24px;border:1px solid #2a2f3a;border-radius:12px;line-height:1.7}code{color:#7ab7ff}';
+const demoJs = `
+const $ = (h) => { document.getElementById('root').innerHTML = h; };
+(async () => {
+  let html = '<main><h2>完整模式 · 桥接自检</h2>';
+  try {
+    const boot = globalThis.__DSH_BOOT__;
+    html += '<p>__DSH_BOOT__ 注入保留: <code>' + JSON.stringify(boot) + '</code></p>';
+    const ping = await fetch('api/ping').then((r) => r.json());
+    html += '<p>HTTP 桥 GET api/ping → <code>' + JSON.stringify(ping) + '</code></p>';
+    const inv = await fetch('api/remote.invoke', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hello: '来自手机的调用' }) }).then((r) => r.json());
+    html += '<p>HTTP 桥 POST api/remote.invoke → <code>' + JSON.stringify(inv) + '</code></p>';
+    const ws = new WebSocket('api/remote.mux');
+    const wsResult = await new Promise((resolve) => {
+      const t = setTimeout(() => resolve('超时'), 5000);
+      ws.onopen = () => ws.send('{"mux":"ping"}');
+      ws.onmessage = (ev) => { clearTimeout(t); resolve(ev.data); };
+      ws.onerror = () => { clearTimeout(t); resolve('error'); };
+    });
+    html += '<p>WS 桥 api/remote.mux 往返 → <code>' + String(wsResult).replace(/</g, '&lt;') + '</code></p>';
+    html += '<p style="color:#4ade80">✔ 全部桥接通道工作正常</p>';
+  } catch (e) {
+    html += '<p style="color:#f87171">✖ ' + String(e && e.message || e).replace(/</g, '&lt;') + '</p>';
+  }
+  html += '</main>';
+  $(html);
+})();
+`;
+const demoFiles = [
+  { path: 'index.html', buf: Buffer.from(demoIndex) },
+  { path: 'manifest.webmanifest', buf: Buffer.from('{"name":"dsh-full-mock"}') },
+  { path: 'assets/app-1.css', buf: Buffer.from(demoCss) },
+  { path: 'assets/app-1.js', buf: Buffer.from(demoJs) },
+];
+const sha8 = (b) => crypto.createHash('sha256').update(b).digest('hex').slice(0, 8);
+const sendP = (payload) => ws.sendText(JSON.stringify({ type: 'data', payload }));
+
+function pushAssets() {
+  const pushId = 'p-' + Date.now().toString(36);
+  sendP({ type: 'asset-begin', pushId, version: 'mock-v1', files: demoFiles.map((f) => ({ path: f.path, size: f.buf.length, sha8: sha8(f.buf) })) });
+  for (const f of demoFiles) {
+    sendP({ type: 'asset-put', pushId, path: f.path, seq: 0, total: 1, data: f.buf.toString('base64') });
+    sendP({ type: 'asset-end', pushId, path: f.path });
+  }
+  sendP({ type: 'asset-commit', pushId, version: 'mock-v1' });
+  console.log('full-mode assets pushed:', demoFiles.length, 'files');
+}
+
+const wsEchoes = new Map();   // wsId → true
+function handleFull(p) {
+  switch (p.type) {
+    case 'full-info-state': pushAssets(); return true;
+    case 'asset-ok': return true;
+    case 'asset-committed': console.log('full-mode committed: files=' + p.files, 'bytes=' + p.bytes); return true;
+    case 'error':
+      if (String(p.code || '').startsWith('asset-')) { console.error('asset error:', p.code, p.message); return true; }
+      return false;
+    case 'http-req': {
+      const body = (() => {
+        if (p.path === 'api/ping') return JSON.stringify({ pong: true, ts: Date.now() });
+        if (p.path === 'api/remote.invoke') return JSON.stringify({ echoed: JSON.parse(Buffer.from(p.body || '', 'base64').toString('utf8')), via: 'mock-device' });
+        return JSON.stringify({ path: p.path, method: p.method, note: 'mock-device generic echo' });
+      })();
+      sendP({ type: 'http-res-head', reqId: p.reqId, status: 200, headers: { 'content-type': 'application/json' } });
+      sendP({ type: 'http-res-chunk', reqId: p.reqId, data: Buffer.from(body).toString('base64') });
+      sendP({ type: 'http-res-end', reqId: p.reqId });
+      return true;
+    }
+    case 'ws-open': sendP({ type: 'ws-opened', wsId: p.wsId }); return true;
+    case 'ws-text': sendP({ type: 'ws-text', wsId: p.wsId, text: JSON.stringify({ mux: 'echo', got: safeJson(p.text) }) }); return true;
+    case 'ws-bin': sendP({ type: 'ws-bin', wsId: p.wsId, data: p.data }); return true;
+    case 'ws-close': sendP({ type: 'ws-closed', wsId: p.wsId, code: 1000, reason: 'mock' }); return true;
+    default: return false;
+  }
+}
+function safeJson(s) { try { return JSON.parse(s); } catch { return s; } }
 
 await ws.connect();
 const origin = RELAY.replace(/^ws/, 'http').replace(/\/remote\/ws$/, '');

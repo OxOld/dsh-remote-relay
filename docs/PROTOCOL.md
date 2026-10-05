@@ -128,13 +128,78 @@ Msg  = { seq: number,                    // 会话事件序号（幂等/去重�
 
 ---
 
-## 3. 二期保留（v1 不实现，字段已预留）
+## 3. 完整模式（官方 UI 远程化，v1.1 起实现）
 
-- **官方 UI 资产推送**（device → relay 控制消息，不走 data 桥）：
-  `{type:'asset-put', path, seq, final, b64, sha8}` → relay 落盘到 `public/full/<path>`。
-- **HTTP 桥**：relay↔device `{type:'http-req', id, method, path, headers, bodyB64?}` /
-  `{type:'http-res', id, status, headers, bodyB64?, more?}`。
-- **WS 桥**：`{type:'ws-open'|'ws-data'|'ws-close', id, ...}`。
+官方 Web UI（vite `base:'./'`，全部相对路径引用）原样挂载在 relay 的 `/remote/full/`
+路径下，API 与 WS 由 relay 桥接回 device。除 index.html 的绝对路径改写外，不修改官方
+代码；官方 UI 的传输面为：
+
+- 一元 RPC：浏览器 `POST api/<endpoint>`（文档相对路径）→ `/remote/full/api/<endpoint>`；
+- 流与事件：浏览器 WS `api/remote.mux`（相对 `document.baseURI`）→ `/remote/full/api/remote.mux`；
+- 无 Service Worker；dsh 服务端注入的 `globalThis["__DSH_BOOT__"]` 启动清单由插件在
+  推送时从**本机实时 served 页面**抓取保留。
+
+### 3.1 终端鉴权（term-token → cookie）
+
+1. terminal proof 通过后，relay 生成 `termToken`（32B base64url，TTL 7d，内存表）并下发
+   `{type:'term-token', token}`。
+2. terminal 以 `POST /remote/full-auth`（请求头 `authorization: Bearer <termToken>`）换取
+   Cookie：`rrm_full=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800[; Secure]`。
+   轻量 UI 在每次连接 ready 后自动换取。
+3. 所有 `/remote/full/*`（页面、资产、桥接）要求有效 `rrm_full` cookie，且对应 sid 的
+   device 必须在线（桥接时）。cookie 失效（relay 重启）→ 页面导航 302 回 `/remote/`，
+   XHR 401；重新配对后自动恢复。
+
+### 3.2 资产推送（device → relay，data 信封内）
+
+| 方向 | 帧 | 说明 |
+|---|---|---|
+| d→r | `{type:'full-info'}` | 查询已托管状态 |
+| r→d | `{type:'full-info-state', version, files, bytes}` | `version` 为插件计算的指纹，null=未托管 |
+| d→r | `{type:'asset-begin', pushId, version, files:[{path,size,sha8}]}` | 开启一次推送（relay 建暂存目录） |
+| d→r | `{type:'asset-put', pushId, path, seq, total, data}` | 单文件分帧，`data` b64 ≤ 256KB，seq 从 0 |
+| d→r | `{type:'asset-end', pushId, path}` | 校验 size+sha8 后落盘该文件 |
+| d→r | `{type:'asset-commit', pushId, version}` | 暂存目录原子换正，relay 回 `asset-committed` |
+| d→r | `{type:'asset-abort', pushId}` | 丢弃暂存 |
+| r→d | `{type:'asset-ok', pushId}` / `{type:'asset-committed', pushId, version, files, bytes}` | 应答 |
+
+校验：`path` 必须 `^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$` 且不含 `..` 段；单文件 ≤ 20MB，
+单次推送总量 ≤ 128MB、文件数 ≤ 800；`sha8` 为内容 SHA-256 前 8 个 hex。任何校验失败
+relay 回 `{type:'error', fatal:false, code:'asset-*', message}`（不断连），device 侧 abort。
+
+### 3.3 HTTP 桥（手机 `/remote/full/api/*` → device 本机）
+
+| 方向 | 帧 | 说明 |
+|---|---|---|
+| r→d | `{type:'http-req', reqId, method, path, query, headers, body?}` | `path` 如 `api/remote.invoke`；`body` b64 ≤ 5MB；`headers` 仅透传 content-type/accept/accept-language/range/user-agent（剔除 cookie） |
+| d→r | `{type:'http-res-head', reqId, status, headers}` | `headers` 剔除 set-cookie/connection/transfer-encoding/content-length/content-encoding/upgrade |
+| d→r | `{type:'http-res-chunk', reqId, data}` | b64 ≤ 256KB，顺序发送 |
+| d→r | `{type:'http-res-end', reqId}` / `{type:'http-res-abort', reqId}` | 正常结束 / 本地异常中止 |
+| r→d | `{type:'http-ack', reqId, bytes}` | 流控信用：device 未确认 > 2MB 时暂停读本地响应 |
+| r→d | `{type:'http-cancel', reqId}` | 手机侧断开/超时，device 中止本地请求 |
+
+device 侧约束：仅接受 `path` 以 `api/` 开头的请求；本地请求附带铸造的 dsh 会话 cookie
+（`connection.authenticatedUrl` + `authorizeIndex`），GET/HEAD 收到 401 重铸重放一次；
+phone 请求体 ≤ 5MB（超出 413），响应累计 ≤ 256MB（超出 abort）。
+relay 侧约束：reqId 连接内唯一；device 离线即时 503；head 超时 120s。
+
+### 3.4 WS 桥（`/remote/full/api/*` Upgrade → device 本机 WS，1:1）
+
+| 方向 | 帧 | 说明 |
+|---|---|---|
+| r→d | `{type:'ws-open', wsId, path, query, headers}` | device 打开本机 `ws://127.0.0.1:<port>/<path>?<query>`（带 dsh cookie） |
+| 双向 | `{type:'ws-text', wsId, text}` / `{type:'ws-bin', wsId, data}` | 数据帧原样透传（text/binary 分别保序） |
+| r→d | `{type:'ws-close', wsId, code, reason}` | 手机侧关闭 |
+| d→r | `{type:'ws-opened', wsId}` / `{type:'ws-closed', wsId, code, reason}` | 本地握手完成 / 本地关闭 |
+
+两侧心跳各自独立（relay↔phone 与 relay↔device、device↔本机 dsh），ping/pong 不跨段转发。
+device 侧仅接受 `path` 以 `api/` 开头的桥；并发桥 ≤ 16，超出回 `ws-closed 1013`。
+
+### 3.5 版本指纹与重推
+
+`version = sha8(去 __DSH_BOOT__ 注入段后的 served index.html)`。插件在每次连接 ready 后
+比对 `full-info-state`，不一致才推送（家宽上行一次性 ~10MB 量级）；relay 重启不丢资产
+（落盘 `data/assets/full/`），dsh 升级后 index 指纹变化自动重推。
 
 ---
 
@@ -145,6 +210,9 @@ Msg  = { seq: number,                    // 会话事件序号（幂等/去重�
 | `GET /remote/` | 轻量 UI（index.html，no-cache） |
 | `GET /remote/app.js` `/remote/style.css` | UI 资源（no-cache，小文件） |
 | `GET /remote/vendor/*` | 第三方库（immutable 30d，文件名带版本） |
-| `GET /remote/full/*` | 二期：官方 UI 托管资产 |
-| `GET /remote/ws` → Upgrade | 中继 WebSocket |
+| `GET /remote/full/` | 完整模式官方 UI（cookie 门禁，index no-cache，`/remote/full/assets/*` immutable） |
+| `ANY /remote/full/api/*` | HTTP 桥（cookie 门禁 → device） |
+| `WS /remote/full/api/remote.mux` | WS 桥 Upgrade（cookie 门禁 → device） |
+| `POST /remote/full-auth` | term-token 换 `rrm_full` cookie |
+| `GET /remote/ws` → Upgrade | 中继 WebSocket（轻量 UI） |
 | `GET /healthz` | `ok` |

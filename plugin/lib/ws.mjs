@@ -111,6 +111,7 @@ export class WsClient {
       if (opcode === 0x8) {
         const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1005;
         this._teardown(code, payload.subarray(2).toString('utf8'));
+        try { this.socket.end(); } catch { /* ignore */ }   // 对端已回显 close：立即 FIN，完成握手
         return false;
       }
       if (opcode === 0x9) { this._sendFrame(0xA, payload); return true; }

@@ -68,6 +68,17 @@ const ctx = {
 };
 
 // 面板/配置路由挂到真实 HTTP 服务器上，顺带承载 /api/session.cancel
+// 以及"官方 UI"风格端点（完整模式 E2E 用）：served index 带 __DSH_BOOT__ 注入
+const fakeIndex = [
+  '<!doctype html><html><head>',
+  '<meta name="viewport" content="width=device-width, initial-scale=1" />',
+  '<title>DSH E2E Build</title>',
+  '<link href="/manifest.webmanifest" rel="manifest">',
+  '<script>globalThis["__DSH_BOOT__"] = {"e2e":true}</script>',
+  '<script src="./assets/app-1.js"></script>',
+  '</head><body><div id="root"></div></body></html>',
+].join('');
+const apiEchoBodies = [];
 const httpServer = http.createServer((req, res) => {
   const pathname = new URL(req.url, 'http://x').pathname;
   if (pathname === '/api/session.cancel') {
@@ -76,10 +87,53 @@ const httpServer = http.createServer((req, res) => {
     req.on('end', () => { apiBodies.push(body); res.writeHead(200, { 'content-type': 'application/json' }).end('{"result":{"accepted":true}}'); });
     return;
   }
+  if (pathname === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fakeIndex); return; }
+  if (pathname === '/manifest.webmanifest') { res.writeHead(200, { 'content-type': 'application/manifest+json' }).end('{"name":"dsh-e2e"}'); return; }
+  if (pathname === '/assets/app-1.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("e2e asset")'); return; }
+  if (pathname === '/api/echo') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      apiEchoBodies.push(body);
+      // set-cookie 故意带上：验证桥接过滤，不把 dsh 会话 cookie 泄露给手机
+      res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'dsh-auth-e2e=secret; Path=/' }).end(JSON.stringify({ echo: body, method: req.method }));
+    });
+    return;
+  }
   for (const route of registeredRoutes) {
     if (route.path === pathname) { void route.handler(req, res); return; }
   }
   res.writeHead(404).end();
+});
+// 官方 UI 的 mux WS（完整模式 WS 桥的本地对端）：文本帧回显
+httpServer.on('upgrade', (req, socket) => {
+  const pathname = new URL(req.url, 'http://x').pathname;
+  if (pathname !== '/api/remote.mux') { socket.destroy(); return; }
+  const key = req.headers['sec-websocket-key'];
+  if (!key) { socket.write('HTTP/1.1 400 Bad Request\r\n\r\n'); socket.destroy(); return; }
+  const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
+  socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n');
+  let buf = Buffer.alloc(0);
+  socket.on('error', () => { try { socket.destroy(); } catch { /* ignore */ } });   // 对端 RST 时避免未处理 error 事件
+  socket.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    for (;;) {
+      if (buf.length < 2) break;
+      const b0 = buf[0], b1 = buf[1], op = b0 & 0x0f;
+      let len = b1 & 0x7f, off = 2;
+      if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); off = 4; }
+      else if (len === 127) { if (buf.length < 10) break; len = Number(buf.readBigUInt64BE(2)); off = 10; }
+      let maskKey = null;
+      if (b1 & 0x80) { if (buf.length < off + 4) break; maskKey = buf.subarray(off, off + 4); off += 4; }
+      if (buf.length < off + len) break;
+      const payload = Buffer.from(buf.subarray(off, off + len));
+      if (maskKey) for (let i = 0; i < payload.length; i++) payload[i] ^= maskKey[i & 3];
+      buf = buf.subarray(off + len);
+      if (op === 0x9) socket.write(Buffer.concat([Buffer.from([0x8a, payload.length]), payload]));   // ping → pong（未掩码）
+      else if (op === 0x8) { try { socket.end(); } catch { /* ignore */ } }
+      else if (op === 0x1) socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload]));   // 文本回显
+    }
+  });
 });
 await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
 const httpPort = httpServer.address().port;
@@ -142,6 +196,8 @@ assert.equal(ready.type, 'ready');
 assert.equal(ready.peer, 1);
 const pairT = await term.recv();
 assert.equal(pairT.status, 'matched');
+const termTok = (await term.nextData()).payload;   // ready 后紧跟完整模式凭据
+assert.equal(termTok.type, 'term-token');
 const helloPayload = (await term.nextData()).payload;
 assert.equal(helloPayload.c, 'hello');
 assert.equal(helloPayload.device.name, '测试机 E2E');
@@ -240,6 +296,61 @@ const bytes = Buffer.from(chunk.b64, 'base64');
 assert.deepEqual([...bytes], [137, 80, 78, 71, 1, 2, 3, 4]);
 assert.equal(end.sha8, crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 8));
 
+// ── 完整模式（官方 UI 远程化，协议 §3）──────────────────────────────────────
+const relayOrigin = `http://127.0.0.1:${relay.port}`;
+const rawReq = (method, base, p, { headers = {}, body = null } = {}) => new Promise((resolve, reject) => {
+  const u = new URL(p, base);
+  const req = http.request({ host: u.hostname, port: u.port, path: u.pathname + u.search, method, headers }, (res) => {
+    const chunks = [];
+    res.on('data', (c) => chunks.push(c));
+    res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+  });
+  req.on('error', reject);
+  if (body) req.write(body);
+  req.end();
+});
+
+STEP('10b', '完整模式：term-token 换 cookie，插件自动推送官方 UI 资产…');
+const authRes = await rawReq('POST', relayOrigin, '/remote/full-auth', { headers: { authorization: 'Bearer ' + termTok.token } });
+assert.equal(authRes.status, 204, 'full-auth 应 204');
+const fullCookie = (authRes.headers['set-cookie'] || [''])[0].split(';')[0];
+assert.ok(fullCookie.startsWith('rrm_full='));
+// 插件在 relay ready 时自动推送；轮询 /remote/full/ 直到资产可访问
+let fullPage = null;
+for (let i = 0; i < 100 && !fullPage; i++) {
+  const r = await rawReq('GET', relayOrigin, '/remote/full/', { headers: { cookie: fullCookie } });
+  if (r.status === 200) fullPage = r; else await sleep(150);
+}
+assert.ok(fullPage, '15s 内官方 UI 资产未推送完成');
+const fullBody = fullPage.body.toString('utf8');
+assert.match(fullBody, /globalThis\["__DSH_BOOT__"\] = \{"e2e":true\}/, '__DSH_BOOT__ 注入必须保留');
+assert.match(fullBody, /href="manifest\.webmanifest"/, '绝对路径应改写为相对');
+assert.match(fullBody, /src="\.\/assets\/app-1\.js"/, '本已相对的引用不应被改写');
+const assetRes = await rawReq('GET', relayOrigin, '/remote/full/assets/app-1.js', { headers: { cookie: fullCookie } });
+assert.equal(assetRes.status, 200);
+assert.equal(assetRes.body.toString(), 'console.log("e2e asset")');
+assert.match(assetRes.headers['cache-control'], /immutable/);
+
+STEP('10c', '完整模式：HTTP 桥（/remote/full/api/* → 本机 dsh）…');
+const echoRes = await rawReq('POST', relayOrigin, '/remote/full/api/echo?x=1', {
+  headers: { cookie: fullCookie, 'content-type': 'application/json' },
+  body: JSON.stringify({ from: 'phone' }),
+});
+assert.equal(echoRes.status, 200);
+const echoJson = JSON.parse(echoRes.body.toString());
+assert.equal(echoJson.method, 'POST');
+assert.equal(JSON.parse(echoJson.echo).from, 'phone');
+assert.equal(echoRes.headers['set-cookie'], undefined, 'dsh 会话 cookie 不得外泄');
+assert.ok(apiEchoBodies.length > 0, '本地 /api/echo 未被调用');
+
+STEP('10d', '完整模式：WS 桥（api/remote.mux 1:1 透传）…');
+const mux = await connectJson(`ws://127.0.0.1:${relay.port}/remote/full/api/remote.mux`, { headers: { cookie: fullCookie } });
+mux.send({ mux: 'ping', n: 1 });
+const echoed = await mux.recv(8000);
+assert.deepEqual(echoed, { mux: 'ping', n: 1 });
+mux.close(1000);
+await new Promise((r) => setTimeout(r, 300));   // 让关闭握手完成，暴露异步错误
+
 STEP(11, '面板注入：index-inject 与 tapIndex 双通道…');
 const table = [];
 ctx.emit('webserver/index-inject', table);
@@ -285,7 +396,7 @@ await relay.close();
 httpServer.close();
 await new Promise((r) => httpServer.closeAllConnections?.() ?? r());
 fs.rmSync(tmp, { recursive: true, force: true });
-console.log('\n全部通过 ✓  （12 组用例：连接/配对/列表/快照/实时/发送/取消/批准/附件/注入/重置）');
+console.log('\n全部通过 ✓  （15 组用例：连接/配对/列表/快照/实时/发送/取消/批准/附件/完整模式资产/HTTP桥/WS桥/注入/重置）');
 process.exit(0);
 
 async function postConfig(patch) {

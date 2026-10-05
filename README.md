@@ -22,11 +22,13 @@ docs/PROTOCOL.md        三方协议契约（relay/UI 只按它实现，永不 i
 docs/DESIGN.zh.md       架构决策记录（为什么弃用全量代理）
 relay/relay.mjs         中继服务（单文件，零依赖，Node ≥ 20）
 relay/public/           轻量移动端 UI（无构建，原生 ES modules）
+relay/full.mjs          完整模式：官方 UI 托管 + cookie 门禁 + 桥接（由 relay.mjs 挂载）
 relay/Dockerfile 等     Dockerfile + docker-compose.yml + .env.example
 relay/deploy/           部署文档 + systemd 样例
 plugin/                 dsh 插件（npm 包 dsh-remote-relay）
 plugin/lib/index.mjs    cordis 插件主体
 plugin/lib/projector.mjs 会话事件 → 远程消息投影器（纯函数）
+plugin/lib/fullbridge.mjs 完整模式：官方 UI 资产推送 + HTTP/WS 桥接
 plugin/lib/panel.mjs    dsh 内注入的二维码/设置面板（自动组装）
 plugin/lib/ws.mjs       零依赖 WebSocket 客户端
 ```
@@ -52,17 +54,17 @@ plugin/lib/ws.mjs       零依赖 WebSocket 客户端
 
 ```bash
 # 中继（WS 编解码/鉴权/桥接/限速/分片/心跳，14 项）
-node --test relay/test/relay.test.mjs
+node --test relay/test/relay.test.mjs relay/test/full.test.mjs
 # 投影器单测
 node --test plugin/test/projector.test.mjs
-# 全链路集成（真实 relay + 假 dsh ctx + 终端客户端，12 组用例）
+# 全链路集成（真实 relay + 假 dsh ctx + 终端客户端，15 组用例）
 node plugin/test/test-dist.mjs
 ```
 
 ## 状态
 
 - ✅ 一期（轻量模式）：全部完成并有测试覆盖
-- 🔜 二期（完整模式）：官方 UI 资产推送到中继托管 + API/WS 桥接（协议已在 PROTOCOL.md §3 预留）
+- ✅ 二期（完整模式）：官方 UI 原样托管到中继（/remote/full/）+ HTTP/WS 桥接回设备，协议见 PROTOCOL.md §3
 
 ## License
 

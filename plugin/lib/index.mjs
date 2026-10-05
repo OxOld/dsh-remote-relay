@@ -21,6 +21,7 @@ import path from 'node:path';
 import { WsClient } from './ws.mjs';
 import { INJECT_SCRIPT } from './panel.mjs';
 import { projectEvent, projectHistory, findAttachmentRef, toSess, truncate } from './projector.mjs';
+import { createFullBridge } from './fullbridge.mjs';
 
 export const name = 'remote-relay';
 export const inject = ['timer'];
@@ -61,6 +62,7 @@ export function apply(ctx, rawConfig) {
     approveFromPhone: cfg.approveFromPhone ?? true,
     approvalTimeoutMs: cfg.approvalTimeoutMs ?? 120000,
     regToken: cfg.regToken ?? '',   // 中继的设备注册口令（服务器设置 RELAY_REG_TOKEN 时必填）
+    syncFullUi: cfg.syncFullUi ?? true,   // 完整模式：把官方 UI 资产推送到 relay 托管
   };
   try {
     if (fs.existsSync(cfgFilePath)) {
@@ -168,6 +170,16 @@ export function apply(ctx, rawConfig) {
     }));
   };
 
+  // ── 完整模式桥（资产推送 + HTTP/WS 桥接）────────────────────────────────
+  const fullBridge = createFullBridge({
+    log,
+    sendData,
+    getPort: () => resolvedTargetPort,
+    refreshSessionCookie,
+    invalidateCookie: () => { sessionCookie = null; },
+    fullUiEnabled: () => !!config.syncFullUi,
+  });
+
   // ── 连接管理 ────────────────────────────────────────────────────────────
   const scheduleReconnect = () => {
     if (!wantConnect || reconnectTimer) return;
@@ -199,6 +211,7 @@ export function apply(ctx, rawConfig) {
     approveFromPhone: !!config.approveFromPhone,
     approvalTimeoutMs: config.approvalTimeoutMs,
     regToken: config.regToken || '',
+    syncFullUi: !!config.syncFullUi,
     error: lastError,
   });
 
@@ -240,6 +253,7 @@ export function apply(ctx, rawConfig) {
       if (terminalOnline) { terminalOnline = false; }
       for (const p of pendingApprovals.values()) p.resolve(null);
       pendingApprovals.clear();
+      fullBridge.abortAll();   // 中止桥接的本地请求/WS 与未完成的资产推送
       if (was) log('relay connection lost');
       scheduleReconnect();
     };
@@ -261,6 +275,7 @@ export function apply(ctx, rawConfig) {
     if (msg.type === 'ready') {
       log('relay ready, peer:', msg.peer);
       if (msg.peer === 1) setTerminalOnline(true);
+      void fullBridge.syncFullAssets();   // 完整模式：比对指纹，变了才推送（协议 §3.5）
       return;
     }
     if (msg.type === 'pair') {
@@ -281,6 +296,19 @@ export function apply(ctx, rawConfig) {
   // ── 终端命令 ────────────────────────────────────────────────────────────
   function handleData(p) {
     try {
+      // 完整模式帧（asset 应答 / http 桥 / ws 桥）先于轻量命令路由
+      if (p?.type) {
+        if (p.type === 'full-info-state' || p.type === 'asset-ok' || p.type === 'asset-committed' ||
+            (p.type === 'error' && String(p.code || '').startsWith('asset-'))) {
+          fullBridge.handleSyncReply(p);
+          return;
+        }
+        if (p.type === 'http-req' || p.type === 'http-ack' || p.type === 'http-cancel' ||
+            p.type === 'ws-open' || p.type === 'ws-close' || p.type === 'ws-text' || p.type === 'ws-bin') {
+          fullBridge.handleRelayFrame(p);
+          return;
+        }
+      }
       switch (p?.c) {
         case 'bootstrap-request': void handleBootstrap(); break;
         case 'open': void handleOpen(p); break;
@@ -611,6 +639,7 @@ export function apply(ctx, rawConfig) {
     if (typeof patch.deviceName === 'string') { config.deviceName = truncate(patch.deviceName.trim(), 64) || '我的 dsh'; }
     if (typeof patch.autoConnect === 'boolean') config.autoConnect = patch.autoConnect;
     if (typeof patch.approveFromPhone === 'boolean') config.approveFromPhone = patch.approveFromPhone;
+    if (typeof patch.syncFullUi === 'boolean') config.syncFullUi = patch.syncFullUi;
     if (Number.isFinite(patch.approvalTimeoutMs)) config.approvalTimeoutMs = Math.max(5000, Math.min(patch.approvalTimeoutMs, 600000));
     if (typeof patch.regToken === 'string') {
       const v = patch.regToken.trim();

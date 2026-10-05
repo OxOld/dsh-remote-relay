@@ -278,7 +278,16 @@ function onMatched(recover) {
 }
 
 // ── 数据分发 ─────────────────────────────────────────────────────────────────
+async function fullAuth(token) {
+  // 完整模式凭据：换取 rrm_full cookie（HttpOnly），/remote/full/* 全靠它
+  try {
+    const r = await fetch('/remote/full-auth', { method: 'POST', headers: { authorization: 'Bearer ' + token } });
+    if (!r.ok) console.warn('[rrm] full-auth →', r.status);
+  } catch { /* 离线时静默，下次连接再换 */ }
+}
+
 function handleData(p) {
+  if (p.type === 'term-token') { void fullAuth(p.token); return; }
   switch (p.c) {
     case 'hello': break;
     case 'bootstrap': {
@@ -553,6 +562,12 @@ function renderSessions() {
     location.hash = '#/pair';
   };
   bar.appendChild(dot); bar.appendChild(title); bar.appendChild(reset);
+  const full = el('button', 'back', '官方界面');
+  full.onclick = () => {
+    if (state.conn !== 'matched') { alert('设备未连接，无法进入官方界面'); return; }
+    location.href = '/remote/full/';
+  };
+  bar.appendChild(full);
   const list = el('div', 'list');
   list.dataset.role = 'sesslist';
   $app.appendChild(bar); $app.appendChild(list);

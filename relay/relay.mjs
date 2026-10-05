@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { setupFullMode } from './full.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -90,7 +91,8 @@ class WsConn {
       if (!fin || payload.length > 125) { this.close(1002, 'bad-control'); return false; }
       if (opcode === 0x8) {                          // close
         const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1005;
-        this.close(code, '', true);
+        this.close(code, '', true);                  // 回显 close（close() 内 end() → FIN）
+        this._teardown(code, '');                    // 立即触发 onclose 清理，不等对端 FIN
         return false;
       }
       if (opcode === 0x9) { this._sendFrame(0xA, payload); return true; }   // ping → pong
@@ -133,7 +135,7 @@ class WsConn {
   sendText(str) { return this._sendFrame(0x1, Buffer.from(String(str), 'utf8')); }
   sendBinary(buf) { return this._sendFrame(0x2, Buffer.from(buf)); }
   ping() { return this._sendFrame(0x9, Buffer.alloc(0)); }
-  /** echo=true 表示这是对端 close 的回显，直接等 socket 自关 */
+  /** echo=true 表示这是对端 close 的回显；回显后立刻 end() 让对端收到 FIN，完成关闭握手 */
   close(code = 1000, reason = '', echo = false) {
     if (this._closeSent) return;
     this._closeSent = true;
@@ -143,7 +145,7 @@ class WsConn {
     if (r.length) r.copy(p, 2);
     this._sendFrame(0x8, p);        // 先发帧（_closed 置位会拦截 _sendFrame）
     this._closed = true;
-    if (!echo) { try { this.socket.end(); } catch { /* ignore */ } }
+    try { this.socket.end(); } catch { /* ignore */ }
     setTimeout(() => { try { this.socket.destroy(); } catch { /* ignore */ } }, 3000).unref?.();
   }
 
@@ -249,7 +251,8 @@ export function startRelay(opts = {}) {
   const publicDir = path.resolve(opts.publicDir ?? process.env.RELAY_PUBLIC_DIR ?? path.join(__dirname, 'public'));
   const tlsCert = opts.tlsCert ?? process.env.RELAY_TLS_CERT ?? '';
   const tlsKey = opts.tlsKey ?? process.env.RELAY_TLS_KEY ?? '';
-  const registry = new Registry(path.resolve(opts.dataDir ?? process.env.RELAY_DATA_DIR ?? path.join(__dirname, 'data'), 'devices.json'));
+  const resolvedDataDir = path.resolve(opts.dataDir ?? process.env.RELAY_DATA_DIR ?? path.join(__dirname, 'data'));
+  const registry = new Registry(path.join(resolvedDataDir, 'devices.json'));
   const guard = new FailGuard();
   // 注册口令：设置后，新设备（未注册的 sid）必须携带匹配的 regToken 才能注册，
   // 防止知道域名的陌生人在此中继上白嫖转发。已注册设备的重连不受影响。
@@ -262,10 +265,18 @@ export function startRelay(opts = {}) {
   const slot = (sid) => { let s = slots.get(sid); if (!s) { s = { device: null, deviceMeta: null, terminal: null }; slots.set(sid, s); } return s; };
 
   const serveStatic = makeStaticHandler(publicDir);
+  const full = setupFullMode({
+    dataDir: resolvedDataDir,
+    getDevice: (sid) => slots.get(sid)?.device || null,   // 只读，不创建空槽
+    WsConn, liveConns,
+    tlsReady: !!(tlsCert && tlsKey), log,
+  });
 
   function httpHandler(req, res) {
-    const pathname = new URL(req.url, 'http://x').pathname;
+    const url = new URL(req.url, 'http://x');
+    const pathname = url.pathname;
     if (pathname === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }).end('ok'); return; }
+    if (pathname === '/remote/full-auth' || pathname === '/remote/full' || pathname.startsWith('/remote/full/')) { full.handleHttp(req, res, url); return; }
     if (pathname === '/remote' || pathname.startsWith('/remote/')) { serveStatic(req, res, pathname); return; }
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 not found');
   }
@@ -278,6 +289,7 @@ export function startRelay(opts = {}) {
   server.on('upgrade', (req, socket, head) => {
     let pathname = '/';
     try { pathname = new URL(req.url, 'http://x').pathname; } catch { /* ignore */ }
+    if (full.isFullApiUpgrade(pathname)) { full.bridgeWs(req, socket, head, new URL(req.url, 'http://x')); return; }
     if (pathname !== WS_PATH) { socket.write('HTTP/1.1 404 Not Found\r\n\r\n'); socket.destroy(); return; }
     const key = req.headers['sec-websocket-key'];
     if (!key || String(req.headers.upgrade || '').toLowerCase() !== 'websocket') {
@@ -317,6 +329,7 @@ export function startRelay(opts = {}) {
         if (info.role === 'device' && s.device === conn) {
           s.device = null; s.deviceMeta = null;
           log(`device ${info.sid} disconnected`);
+          full.deviceOffline(info.sid);
           if (s.terminal) { s.terminal.close(4010, 'device-disconnected'); s.terminal = null; }
         } else if (info.role === 'terminal' && s.terminal === conn) {
           s.terminal = null;
@@ -408,6 +421,8 @@ export function startRelay(opts = {}) {
             type: 'ready', role: 'terminal', sid: info.sid,
             peer: s.device ? 1 : 0, device: s.device ? { name: s.deviceMeta?.name || '' } : null,
           }));
+          // 完整模式凭据：terminal 据此 POST /remote/full-auth 换 rrm_full cookie
+          conn.sendText(JSON.stringify({ type: 'data', payload: { type: 'term-token', token: full.issueTermToken(info.sid) }, ts: Date.now() }));
           if (s.device) {
             conn.sendText(JSON.stringify({ type: 'pair', status: 'matched' }));
             s.device.sendText(JSON.stringify({ type: 'pair', status: 'matched' }));
@@ -421,6 +436,13 @@ export function startRelay(opts = {}) {
       if (stage === 'ready') {
         if (msg.type !== 'data' || !msg.payload || typeof msg.payload !== 'object') return;
         const s = slot(info.sid);
+        if (info.role === 'device') {
+          // 完整模式帧由 relay 本地消化（资产托管 / HTTP·WS 桥），不进轻量桥
+          const t = msg.payload.type;
+          if (t === 'full-info' || (typeof t === 'string' && t.startsWith('asset-'))) { full.deviceAsset(conn, info.sid, msg.payload); return; }
+          if (t === 'http-res-head' || t === 'http-res-chunk' || t === 'http-res-end' || t === 'http-res-abort' ||
+              t === 'ws-opened' || t === 'ws-text' || t === 'ws-bin' || t === 'ws-closed') { full.deviceBridge(conn, info.sid, msg.payload); return; }
+        }
         const peer = info.role === 'device' ? s.terminal : s.device;
         if (!peer) return;
         peer.sendText(JSON.stringify({ type: 'data', payload: msg.payload, ts: Date.now() }));

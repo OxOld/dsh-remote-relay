@@ -90,6 +90,7 @@ function rrmPaint() {
     f.deviceName.value = info.deviceName || '';
     f.autoConnect.checked = !!info.autoConnect;
     f.approveFromPhone.checked = !!info.approveFromPhone;
+    if (f.syncFullUi) f.syncFullUi.checked = !!info.syncFullUi;
     f.approvalTimeoutMs.value = info.approvalTimeoutMs || 120000;
     f.regToken.value = info.regToken || '';
   }
@@ -173,6 +174,13 @@ function rrmBuildPanel() {
   row2.appendChild(rrmEl('label', null, '允许在手机上批准工具调用'));
   row2.lastChild.htmlFor = 'rrm-ap';
   f.appendChild(row2);
+  var row3 = rrmEl('div', 'rrm-row');
+  f.syncFullUi = document.createElement('input');
+  f.syncFullUi.type = 'checkbox'; f.syncFullUi.id = 'rrm-sf';
+  row3.appendChild(f.syncFullUi);
+  row3.appendChild(rrmEl('label', null, '完整模式：推送官方 UI 到服务器（手机用原版界面）'));
+  row3.lastChild.htmlFor = 'rrm-sf';
+  f.appendChild(row3);
   var save = rrmEl('button', 'rrm-btn', '保存并重连');
   save.type = 'submit';
   save.onclick = function (ev) {
@@ -183,6 +191,7 @@ function rrmBuildPanel() {
       deviceName: f.deviceName.value.trim(),
       autoConnect: !!f.autoConnect.checked,
       approveFromPhone: !!f.approveFromPhone.checked,
+      syncFullUi: !!f.syncFullUi.checked,
       approvalTimeoutMs: Number(f.approvalTimeoutMs.value) || 120000,
       regToken: f.regToken.value.trim(),
     }, save);

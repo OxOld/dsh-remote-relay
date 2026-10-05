@@ -35,6 +35,10 @@ async function authed(role, { sid = SID, password = PASSWORD, hash, name = '测�
   await c.send({ type: 'proof', proof: proofOf(hash ?? hashOf(password), challenge.nonce, role, sid) });
   const ready = await c.recv();
   assert.equal(ready.type, 'ready');
+  if (role === 'terminal') {
+    const tok = await c.nextData();          // ready 后紧跟 term-token（完整模式凭据），排空
+    assert.equal(tok.payload.type, 'term-token');
+  }
   return { c, ready };
 }
 
