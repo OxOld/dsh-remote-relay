@@ -113,18 +113,23 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     }
     let rel = url.pathname.slice(FULL_BASE.length);            // '/xxx' or '/'
     if (rel === '' || rel === '/') rel = '/index.html';
-    const clean = path.normalize(rel).replace(/^([/\\])+/, '');
-    if (clean.split(/[\\/]/).includes('..')) { res.writeHead(400).end(); return; }
+    if (url.search) rel += url.search;                          // combo URL（plugins/??a,b）的文件列表在 search 里
+    const isCombo = /[?&@]/.test(rel);
+    const clean = isCombo
+      ? 'enc-' + crypto.createHash('sha256').update(rel).digest('hex').slice(0, 12)
+      : path.normalize(rel).replace(/^([/\\])+/, '');
+    if (!isCombo && clean.split(/[\\/]/).includes('..')) { res.writeHead(400).end(); return; }
     const file = path.join(liveDir, clean);
-    if (!file.startsWith(liveDir + path.sep)) { res.writeHead(400).end(); return; }
+    if (!isCombo && !file.startsWith(liveDir + path.sep)) { res.writeHead(400).end(); return; }
     let buf;
     try { buf = fs.readFileSync(file); } catch { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing (等待设备推送，或开启插件 syncFullUi)'); return; }
     const ext = path.extname(file).toLowerCase();
-    const immutable = clean.startsWith('assets' + path.sep) || clean.startsWith('assets/');
+    const immutable = !isCombo && (clean.startsWith('assets' + path.sep) || clean.startsWith('assets/'));
     const cache = clean === 'index.html' ? 'no-cache' : immutable ? 'public, max-age=31536000, immutable' : 'public, max-age=300';
     let body = buf;
     if (ext === '.html' && req.method !== 'HEAD') body = Buffer.from(rewriteIndex(buf.toString('utf8')), 'utf8');
-    res.writeHead(200, { 'content-type': MIME[ext] || 'application/octet-stream', 'cache-control': cache, 'content-length': body.length });
+    const mime = isCombo ? 'text/javascript; charset=utf-8' : (MIME[ext] || 'application/octet-stream');
+    res.writeHead(200, { 'content-type': mime, 'cache-control': cache, 'content-length': body.length });
     res.end(req.method === 'HEAD' ? undefined : body);
   }
 

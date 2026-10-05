@@ -31,7 +31,18 @@ const VERSION = '0.1.0';
 const CALLID_ARGS_CAP = 512;
 const CHUNK_B64 = 256 * 1024;   // att-chunk 二进制分块（base64 前）
 
-const log = (...a) => console.log(new Date().toISOString(), '[remote-relay]', ...a);
+// 日志：console（宿主 stdout）+ ~/.dsh/tools/remote-relay.log（桌面端 stdout 不可见时的诊断通道）
+let logFile = null;
+const log = (...a) => {
+  const line = new Date().toISOString() + ' [remote-relay] '
+    + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ');
+  console.log(line);
+  if (!logFile) return;
+  try {
+    if (fs.existsSync(logFile) && fs.statSync(logFile).size > 512 * 1024) fs.writeFileSync(logFile, '');
+    fs.appendFileSync(logFile, line + '\n');
+  } catch { /* 忽略日志写失败 */ }
+};
 
 export function apply(ctx, rawConfig) {
   const cfg = rawConfig ?? {};
@@ -52,6 +63,7 @@ export function apply(ctx, rawConfig) {
   const toolsDir = cfg.toolsDir || path.join(homeDir, 'tools');
   try { fs.mkdirSync(toolsDir, { recursive: true }); } catch { /* ignore */ }
   const cfgFilePath = path.join(toolsDir, 'remote-relay.json');
+  logFile = path.join(toolsDir, 'remote-relay.log');
 
   const config = {
     relayUrl: cfg.relayUrl ?? '',

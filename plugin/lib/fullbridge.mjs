@@ -249,18 +249,29 @@ export function createFullBridge(io) {
     req.end();
   });
 
-  /** 从 index/CSS 提取同源资产路径（返回 '/assets/...' 形式，含去重） */
+  /** 从 index/CSS 提取同源资产 key（'/path' 或 '/path??combo&rev=x'，含去重） */
   function collectPaths(html, base, out) {
     const re = /(?:href|src)="([^"]+)"/g;
     let m;
     while ((m = re.exec(html))) {
-      let u;
-      try { u = new URL(m[1], base); } catch { continue; }
-      if (u.origin !== base.origin) continue;
-      if (u.pathname === '/' || out.has(u.pathname)) continue;
-      out.add(u.pathname);
+      addUrl(m[1].replace(/&amp;/g, '&'), base, out);
     }
     return out;
+  }
+  /** __DSH_BOOT__ 等注入 JSON 里的运行时模块 URL（"url":"plugins/??..."） */
+  function collectBootUrls(html, base, out) {
+    const re = /"url":\s*"([^"]+)"/g;
+    let m;
+    while ((m = re.exec(html))) addUrl(m[1].replace(/&amp;/g, '&'), base, out);
+    return out;
+  }
+  function addUrl(raw, base, out) {
+    let u;
+    try { u = new URL(raw, base); } catch { return; }
+    if (u.origin !== base.origin) return;
+    const key = u.pathname + u.search;   // combo URL 的文件列表在 search 里，必须整体保留
+    if (key === '/' || out.has(key)) return;
+    out.add(key);
   }
   function collectCssUrls(cssText, cssPath, origin, out) {
     const re = /url\(\s*['"]?([^'")\s]+)/g;
@@ -269,11 +280,17 @@ export function createFullBridge(io) {
       let u;
       try { u = new URL(m[1], origin + cssPath); } catch { continue; }
       if (u.origin !== origin) continue;
-      if (out.has(u.pathname)) continue;
-      out.add(u.pathname);
+      const key = u.pathname + u.search;
+      if (out.has(key)) continue;
+      out.add(key);
     }
     return out;
   }
+  /** 落盘名：普通路径原样；含 ?&@ 等特殊字符的 combo URL 用定长哈希名（relay 侧同规则寻址） */
+  const diskKey = (key) => {
+    const rel = key.replace(/^\/+/, '');
+    return /^[A-Za-z0-9._/-]+$/.test(rel) ? rel : 'enc-' + crypto.createHash('sha256').update(key).digest('hex').slice(0, 12);
+  };
 
   async function syncFullAssets() {
     if (!fullUiEnabled()) { log('full-mode sync skipped (syncFullUi=false)'); return; }
@@ -285,7 +302,7 @@ export function createFullBridge(io) {
       const st = await waitReply('full-info-state', 15000);
       const cookie = await refreshSessionCookie();
       const indexBuf = await httpGet('/', cookie);
-      const version = 'idx-' + sha8(stripBoot(indexBuf.toString('utf8')));
+      const version = 'idx2-' + sha8(stripBoot(indexBuf.toString('utf8')));
       if (st.version === version) {
         log(`full-mode assets up-to-date (v=${version}, ${st.files} files)`);
         return;
@@ -293,6 +310,7 @@ export function createFullBridge(io) {
       const base = { origin: `http://127.0.0.1:${getPort()}` };
       const origin = base.origin;
       const paths = collectPaths(indexBuf.toString('utf8'), new URL(origin + '/'), new Set(['/']));
+      collectBootUrls(indexBuf.toString('utf8'), new URL(origin + '/'), paths);
       // CSS 内引用再扩散一层
       for (const p2 of [...paths]) {
         if (!p2.endsWith('.css')) continue;
@@ -305,14 +323,24 @@ export function createFullBridge(io) {
       if (list.length > MAX_FILES) throw new Error('too many assets: ' + list.length);
       const files = [{ path: 'index.html', buf: indexBuf }];
       let total = indexBuf.length;
+      let skipped = 0;
       for (const p2 of list) {
-        const buf = await httpGet(p2, cookie);
-        files.push({ path: p2.slice(1), buf });
+        let buf;
+        try {
+          buf = await httpGet(p2, cookie);
+        } catch (e) {
+          // 其他插件注入的行（/plugins/* 等）本地可能 404：跳过即可，这些路径在手机侧同样不可达
+          skipped++;
+          if (skipped <= 5) log('full-mode asset skip:', p2, '—', String(e.message || e).slice(0, 80));
+          continue;
+        }
+        files.push({ path: diskKey(p2), buf });
         total += buf.length;
         if (total > MAX_TOTAL) throw new Error('assets total too large');
       }
+      if (skipped > 5) log(`full-mode asset skip ×${skipped} (其余略)`);
+      log(`full-mode push: ${files.length} files${skipped ? ` (跳过 ${skipped})` : ''}, ${(total / 1048576).toFixed(1)}MB → relay`);
       const pushId = 'p-' + Date.now().toString(36);
-      log(`full-mode push: ${files.length} files, ${(total / 1048576).toFixed(1)}MB → relay`);
       sendData({ type: 'asset-begin', pushId, version, files: files.map((f) => ({ path: f.path, size: f.buf.length, sha8: sha8(f.buf) })) });
       await waitReply('asset-ok', 20000);
       for (const f of files) {
