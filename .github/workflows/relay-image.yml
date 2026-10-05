@@ -1,0 +1,55 @@
+# 中继镜像自动构建：改 relay/ 下代码推到 main 即自动打包并推送 ghcr.io
+# 镜像：ghcr.io/oxold/dsh-remote-relay（GitHub 自动带权限，公开仓库免费；amd64 + arm64）
+# 标签：YYYYMMDD（同日覆盖）、YYYYMMDD-sha8（精确到提交）、latest
+# 注意：首次运行后需在 GitHub → Packages 里把该镜像可见性设为 Public（默认建为私有）
+name: relay-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'relay/**'
+      - '.github/workflows/relay-image.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: relay-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        name: 生成镜像名与版本标签
+        run: |
+          echo "ghcr=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "full=$(date +%Y%m%d)-$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: relay
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.date }}
+            ${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.full }}
+            ${{ steps.meta.outputs.ghcr }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

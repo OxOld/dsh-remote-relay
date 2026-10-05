@@ -101,13 +101,12 @@ docker compose up -d --build
 - 默认监听 8787（HTTP，挂 nginx/caddy 后面）；直接 HTTPS（免 nginx）的改法见 docker-compose.yml 底部注释；
 - 更新版本：拉取新代码后 `docker compose up -d --build`。
 
-**镜像仓库版（免构建）**：如果用推送到镜像仓库的现成镜像（如 `ccr.ccs.tencentyun.com/gede/dsh-remote-relay`），
-把 compose 里的 `build: .`/`image:` 换成仓库镜像地址与 tag，所有值直接写死在文件里（免 .env）：
+**镜像仓库版（免构建）**：不想在服务器上 build 的话，直接用现成镜像，所有值写死在文件里（免 .env）：
 
 ```yaml
 services:
   relay:
-    image: ccr.ccs.tencentyun.com/gede/dsh-remote-relay:20261006
+    image: ghcr.io/oxold/dsh-remote-relay:latest   # 或固定日期标签，如 :20261007
     container_name: dsh-remote-relay
     restart: unless-stopped
     ports: ["8787:8787"]
@@ -118,6 +117,11 @@ services:
 ```
 
 升级 = 改 image tag → `docker compose pull && docker compose up -d`（data 卷不动，设备无需重新配对）。
+
+**镜像自动构建（GitHub Actions）**：仓库公开，改 `relay/` 下代码推到 main 会自动构建并推送到
+`ghcr.io/oxold/dsh-remote-relay`（标签 `YYYYMMDD`、`YYYYMMDD-sha8`、`latest`，amd64 + arm64，
+无需任何 secrets 配置）。首次运行后到 GitHub → Packages 把镜像可见性设为 Public；
+构建状态见仓库 Actions 页，也可手动触发（Run workflow）。
 
 ## 5. dsh 插件侧配置
 
