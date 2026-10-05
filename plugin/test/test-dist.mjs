@@ -90,6 +90,8 @@ const httpServer = http.createServer((req, res) => {
   if (pathname === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fakeIndex); return; }
   if (pathname === '/manifest.webmanifest') { res.writeHead(200, { 'content-type': 'application/manifest+json' }).end('{"name":"dsh-e2e"}'); return; }
   if (pathname === '/assets/app-1.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("e2e asset")'); return; }
+  // 懒加载 chunk：官方 UI 运行时才请求（如终端面板），不在 index 引用里
+  if (pathname === '/plugins/@deepseek-ai/dsh-client-ui-sidebar-terminal/client.terminal.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("e2e terminal chunk")'); return; }
   if (pathname === '/api/echo') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -342,6 +344,11 @@ assert.equal(echoJson.method, 'POST');
 assert.equal(JSON.parse(echoJson.echo).from, 'phone');
 assert.equal(echoRes.headers['set-cookie'], undefined, 'dsh 会话 cookie 不得外泄');
 assert.ok(apiEchoBodies.length > 0, '本地 /api/echo 未被调用');
+
+STEP('10c2', '完整模式：未命中资产回源（懒加载 chunk 经桥取回）…');
+const chunkRes = await rawReq('GET', relayOrigin, '/remote/full/plugins/@deepseek-ai/dsh-client-ui-sidebar-terminal/client.terminal.js?rev=e2e1', { headers: { cookie: fullCookie } });
+assert.equal(chunkRes.status, 200, `回源应 200，实际 ${chunkRes.status}：${chunkRes.body.toString().slice(0, 80)}`);
+assert.equal(chunkRes.body.toString(), 'console.log("e2e terminal chunk")');
 
 STEP('10d', '完整模式：WS 桥（api/remote.mux 1:1 透传）…');
 const mux = await connectJson(`ws://127.0.0.1:${relay.port}/remote/full/api/remote.mux`, { headers: { cookie: fullCookie } });

@@ -157,9 +157,6 @@ test('asset 推送落盘、index 改写服务、immutable 缓存、非法路径�
   assert.match(js.headers['cache-control'], /immutable/);
   assert.equal(js.headers['content-type'], 'text/javascript; charset=utf-8');
 
-  const missing = await httpReq('GET', '/remote/full/assets/nope.js', { headers: { cookie } });
-  assert.equal(missing.status, 404);
-
   // 路径穿越：资产服务 400/404；asset 帧 error(fatal:false) 且连接不断
   const trav = await httpReq('GET', '/remote/full/..%2f..%2fdevices.json', { headers: { cookie } });
   assert.ok(trav.status === 400 || trav.status === 404);
@@ -171,6 +168,19 @@ test('asset 推送落盘、index 改写服务、immutable 缓存、非法路径�
   st = (await d.nextData()).payload;   // 连接仍活着
   assert.equal(st.type, 'full-info-state');
   assert.equal(st.version, 'v1-hash');
+
+  // 未命中资产回源设备（放最后：设备连接要亲自应答 http-req）
+  const fbPromise = httpReq('GET', '/remote/full/plugins/@deepseek-ai/dsh-client-ui-sidebar-terminal/client.terminal.js?rev=abc', { headers: { cookie } });
+  const br = await d.nextData();
+  assert.equal(br.payload.type, 'http-req');
+  assert.equal(br.payload.path, 'plugins/@deepseek-ai/dsh-client-ui-sidebar-terminal/client.terminal.js');
+  assert.equal(br.payload.query, 'rev=abc');
+  d.send({ type: 'data', payload: { type: 'http-res-head', reqId: br.payload.reqId, status: 200, headers: { 'content-type': 'text/javascript' } } });
+  d.send({ type: 'data', payload: { type: 'http-res-chunk', reqId: br.payload.reqId, data: Buffer.from('console.log("chunk")').toString('base64') } });
+  d.send({ type: 'data', payload: { type: 'http-res-end', reqId: br.payload.reqId } });
+  const fallback = await fbPromise;
+  assert.equal(fallback.status, 200);
+  assert.equal(fallback.body.toString(), 'console.log("chunk")');
   await d.close();
 });
 

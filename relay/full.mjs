@@ -113,13 +113,13 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     res.writeHead(204, { 'set-cookie': cookieHeader(m[1]) }).end();
   }
 
-  // ── 资产托管：静态服务 ──
+  // ── 资产托管：静态服务。返回 true=已响应；false=未命中（调用方决定是否回源设备）──
   function serveAsset(req, res, url) {
     const sid = sidOfRequest(req);
     if (!sid) {
       const wantsHtml = req.headers['sec-fetch-mode'] === 'navigate' || String(req.headers.accept || '').includes('text/html');
-      if (wantsHtml) { res.writeHead(302, { location: '/remote/' }).end(); return; }
-      res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"unpaired"}'); return;
+      if (wantsHtml) { res.writeHead(302, { location: '/remote/' }).end(); return true; }
+      res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"unpaired"}'); return true;
     }
     let rel = url.pathname.slice(FULL_BASE.length);            // '/xxx' or '/'
     if (rel === '' || rel === '/') rel = '/index.html';
@@ -128,13 +128,21 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     const clean = isCombo
       ? 'enc-' + crypto.createHash('sha256').update(rel).digest('hex').slice(0, 12)
       : path.normalize(rel).replace(/^([/\\])+/, '');
-    if (!isCombo && clean.split(/[\\/]/).includes('..')) { res.writeHead(400).end(); return; }
+    if (!isCombo && clean.split(/[\\/]/).includes('..')) { res.writeHead(400).end(); return true; }
     const liveDir = liveDirOf(sid);
-    if (!fs.existsSync(liveDir)) { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing (等待设备推送，或开启插件 syncFullUi)'); return; }
+    // index 永远只出推送资产（本地的是绝对路径，回源在手机上不可用）
+    if (rel === '/index.html') {
+      if (!fs.existsSync(liveDir)) { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing (等待设备推送，或开启插件 syncFullUi)'); return true; }
+    } else if (!fs.existsSync(liveDir)) {
+      return false;
+    }
     const file = path.join(liveDir, clean);
-    if (!isCombo && !file.startsWith(liveDir + path.sep)) { res.writeHead(400).end(); return; }
+    if (!isCombo && !file.startsWith(liveDir + path.sep)) { res.writeHead(400).end(); return true; }
     let buf;
-    try { buf = fs.readFileSync(file); } catch { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing (等待设备推送，或开启插件 syncFullUi)'); return; }
+    try { buf = fs.readFileSync(file); } catch {
+      if (rel === '/index.html') { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing (等待设备推送，或开启插件 syncFullUi)'); return true; }
+      return false;
+    }
     const ext = path.extname(file).toLowerCase();
     const immutable = !isCombo && (clean.startsWith('assets' + path.sep) || clean.startsWith('assets/'));
     const cache = clean === 'index.html' ? 'no-cache' : immutable ? 'public, max-age=31536000, immutable' : 'public, max-age=300';
@@ -143,6 +151,7 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     const mime = isCombo ? 'text/javascript; charset=utf-8' : (MIME[ext] || 'application/octet-stream');
     res.writeHead(200, { 'content-type': mime, 'cache-control': cache, 'content-length': body.length });
     res.end(req.method === 'HEAD' ? undefined : body);
+    return true;
   }
 
   // ── 资产推送：device 帧 ──
@@ -419,7 +428,15 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     if (pathname === '/remote/full-auth') { handleFullAuth(req, res); return; }
     if (pathname === FULL_BASE) { res.writeHead(301, { location: FULL_BASE + '/' }).end(); return; }
     if (pathname.startsWith(FULL_BASE + '/api/')) { bridgeHttp(req, res, url); return; }
-    serveAsset(req, res, url);
+    if (serveAsset(req, res, url)) return;
+    // 资产未命中 → 回源设备：懒加载 chunk（如终端的 client.terminal.js）和
+    // 第三方插件文件只有运行时才会被请求，推送阶段拿不到清单
+    let dec;
+    try { dec = decodeURIComponent(pathname.slice(FULL_BASE.length)); } catch { dec = ''; }
+    if ((req.method === 'GET' || req.method === 'HEAD') && !dec.split('/').includes('..')) {
+      bridgeHttp(req, res, url); return;
+    }
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing');
   }
   const isFullApiUpgrade = (pathname) => pathname.startsWith(FULL_BASE + '/api/');
   const info = () => ({

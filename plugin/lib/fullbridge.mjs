@@ -114,7 +114,11 @@ export function createFullBridge(io) {
   function handleRelayFrame(p) {
     switch (p?.type) {
       case 'http-req': {
-        if (!/^api\//.test(String(p.path || ''))) {   // 纵深防御：只桥 api/*
+        const path = String(p.path || '');
+        // 纵深防御：官方 UI 会请求 api/、plugins/（含懒加载 chunk）、assets/ 与根级文件，
+        // 一律放行；拒绝绝对路径、.. 穿越、本插件的管理路由（/remote-relay/*）。
+        // 中继侧同样只对 GET/HEAD 且无 .. 段的未命中资产回源。
+        if (!path || path.startsWith('/') || path.split('/').includes('..') || path.startsWith('remote-relay/')) {
           sendData({ type: 'http-res-head', reqId: p.reqId, status: 403, headers: { 'content-type': 'application/json' } });
           sendData({ type: 'http-res-end', reqId: p.reqId });
           return;
