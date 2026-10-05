@@ -29,7 +29,12 @@ var RRM_CSS =
   '#rrm-panel .rrm-dots.on{background:#2f9e44}' +
   '#rrm-panel canvas{display:block;margin:10px auto 6px;background:#fff;border-radius:8px;padding:6px}' +
   '#rrm-panel .rrm-url{word-break:break-all;font-size:10.5px;opacity:.6;text-align:center}' +
-  '#rrm-panel .rrm-note{font-size:11px;opacity:.6;margin-top:6px;line-height:1.5}';
+  '#rrm-panel .rrm-note{font-size:11px;opacity:.6;margin-top:6px;line-height:1.5}' +
+  '#rrm-panel .rrm-fold{display:flex;align-items:center;padding:11px 16px;font-size:13px;font-weight:600;cursor:pointer;border-bottom:1px solid rgba(128,128,128,.12);user-select:none}' +
+  '#rrm-panel .rrm-fold .rrm-chev{margin-left:auto;opacity:.55;font-size:11px;transition:transform .15s}' +
+  '#rrm-panel .rrm-fold.open .rrm-chev{transform:rotate(90deg)}' +
+  '#rrm-panel .rrm-qrbtn{display:block;width:100%;border:1px solid rgba(128,128,128,.35);background:transparent;color:inherit;border-radius:9px;padding:8px 0;margin-top:9px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}' +
+  '#rrm-panel .rrm-qrwarn{font-size:10.5px;opacity:.55;text-align:center;margin-top:6px}';
 
 function rrmEl(tag, cls, text) {
   var n = document.createElement(tag);
@@ -39,6 +44,7 @@ function rrmEl(tag, cls, text) {
 }
 
 var rrmPanel = null, rrmFab = null, rrmTimer = null, rrmInfo = null, rrmOpen = false, rrmLastSaveAt = 0;
+var rrmQrShown = false, rrmSetOpen = false;   // 截图安全默认：二维码不显示、设置折叠
 
 function rrmApi(path, opts) {
   return fetch('/remote-relay/' + path, opts).then(function (r) { return r.json(); });
@@ -75,15 +81,25 @@ function rrmPaint() {
     else if (Date.now() - rrmLastSaveAt < 8000) st.innerHTML = '<span class="rrm-dots"></span>已保存，正在重连中继…';
     else st.innerHTML = '<span class="rrm-dots"></span>未连接：' + (info.error || '请检查中继地址');
   }
+  var qrbtn = rrmPanel.querySelector('#rrm-qrbtn');
   var qrWrap = rrmPanel.querySelector('#rrm-qr');
+  if (qrbtn) {
+    qrbtn.style.display = info.configured ? '' : 'none';
+    qrbtn.textContent = rrmQrShown ? '隐藏配对二维码' : '显示配对二维码';
+  }
   if (qrWrap) {
-    qrWrap.style.display = info.qrUrl ? '' : 'none';
-    if (info.qrUrl) {
+    var wantQr = rrmQrShown && info.configured && info.qrUrl;
+    qrWrap.style.display = wantQr ? '' : 'none';
+    if (wantQr) {
       var canvas = qrWrap.querySelector('canvas');
       rrmDrawQr(canvas, info.qrUrl);
       qrWrap.querySelector('.rrm-url').textContent = info.qrUrl;
     }
   }
+  var fold = rrmPanel.querySelector('#rrm-set-fold');
+  var setBody = rrmPanel.querySelector('#rrm-set-body');
+  if (fold) fold.className = 'rrm-fold' + (rrmSetOpen ? ' open' : '');
+  if (setBody) setBody.style.display = rrmSetOpen ? '' : 'none';
   var f = rrmPanel.querySelector('#rrm-form');
   if (f && document.activeElement && f.contains(document.activeElement)) { /* 输入中不回填 */ }
   else if (f) {
@@ -127,8 +143,14 @@ function rrmBuildPanel() {
   var st = rrmEl('div');
   st.id = 'rrm-status';
   sec1.appendChild(st);
+  var qrbtn = rrmEl('button', 'rrm-qrbtn', '显示配对二维码');
+  qrbtn.type = 'button';
+  qrbtn.id = 'rrm-qrbtn';
+  qrbtn.onclick = function () { rrmQrShown = !rrmQrShown; rrmPaint(); };
+  sec1.appendChild(qrbtn);
   var qrWrap = rrmEl('div');
   qrWrap.id = 'rrm-qr';
+  qrWrap.style.display = 'none';
   var canvas = document.createElement('canvas');
   canvas.width = canvas.height = 220;
   qrWrap.appendChild(canvas);
@@ -140,10 +162,20 @@ function rrmBuildPanel() {
     }
   };
   qrWrap.appendChild(copy);
+  qrWrap.appendChild(rrmEl('div', 'rrm-qrwarn', '二维码与链接含配对凭据，泄露 = 任何人可直接连接你的设备'));
   sec1.appendChild(qrWrap);
   rrmPanel.appendChild(sec1);
 
+  var fold = rrmEl('div', 'rrm-fold');
+  fold.id = 'rrm-set-fold';
+  fold.appendChild(rrmEl('span', null, '设置'));
+  fold.appendChild(rrmEl('span', 'rrm-chev', '▶'));
+  fold.onclick = function () { rrmSetOpen = !rrmSetOpen; rrmPaint(); };
+  rrmPanel.appendChild(fold);
+
   var sec2 = rrmEl('div', 'rrm-sec');
+  sec2.id = 'rrm-set-body';
+  sec2.style.display = 'none';
   var f = rrmEl('form');
   f.id = 'rrm-form';
   var mk = function (labelText, input) {
@@ -217,6 +249,9 @@ function rrmToggle(open) {
   rrmOpen = open === undefined ? !rrmOpen : open;
   if (rrmOpen) {
     if (!rrmPanel) rrmBuildPanel();
+    rrmQrShown = false;                                // 每次打开默认不显示凭据，截图安全
+    rrmSetOpen = !!(rrmInfo && !rrmInfo.configured);   // 未配置中继时自动展开设置
+    rrmPaint();
     rrmPanel.style.display = 'block';
     rrmRefresh();
     clearInterval(rrmTimer);
