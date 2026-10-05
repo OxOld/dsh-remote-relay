@@ -304,7 +304,7 @@ export function createFullBridge(io) {
   };
 
   async function syncFullAssets() {
-    if (!fullUiEnabled()) { log('full-mode sync skipped (syncFullUi=false)'); return; }
+    if (!fullUiEnabled()) { log('full-mode sync skipped (disabled)'); return; }
     if (syncing) return;
     syncing = true;
     const t0 = Date.now();

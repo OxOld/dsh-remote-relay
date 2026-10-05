@@ -9,7 +9,7 @@
 
 ```
 relay.mjs
-public/            # 整个目录（轻量 UI）
+public/            # 整个目录（配对网关页）
 ```
 
 ```bash
@@ -101,16 +101,36 @@ docker compose up -d --build
 - 默认监听 8787（HTTP，挂 nginx/caddy 后面）；直接 HTTPS（免 nginx）的改法见 docker-compose.yml 底部注释；
 - 更新版本：拉取新代码后 `docker compose up -d --build`。
 
+**镜像仓库版（免构建）**：如果用推送到镜像仓库的现成镜像（如 `ccr.ccs.tencentyun.com/gede/dsh-remote-relay`），
+把 compose 里的 `build: .`/`image:` 换成仓库镜像地址与 tag，所有值直接写死在文件里（免 .env）：
+
+```yaml
+services:
+  relay:
+    image: ccr.ccs.tencentyun.com/gede/dsh-remote-relay:20261006
+    container_name: dsh-remote-relay
+    restart: unless-stopped
+    ports: ["8787:8787"]
+    environment:
+      - RELAY_REG_TOKEN=你的注册口令    # 与 dsh 面板保持一致；不需要防蹭用就删掉这行
+    volumes:
+      - ./data:/app/data
+```
+
+升级 = 改 image tag → `docker compose pull && docker compose up -d`（data 卷不动，设备无需重新配对）。
+
 ## 5. dsh 插件侧配置
 
 装好插件后，打开 dsh 客户端 → 设置弹窗里的"远程"悬浮按钮 → 填写中继地址：
 
 ```
-wss://你的域名/remote/ws        # HTTPS 由 nginx 提供
-# 或 wss://你的域名/remote/ws（relay 直接 HTTPS，同样是 wss://）
+http://你的域名:8787            # HTTP（或反代后的 https://）
+# 也接受完整 WebSocket 地址：ws://…/remote/ws、wss://…/remote/ws
 ```
 
-保存后面板出现二维码，手机扫码即完成配对。
+如果服务器设置了注册口令（见 §6），在"设备注册口令"里填同一个值。
+点"**保存并重连**"后面板出现二维码，手机扫码即完成配对。
+（保存后状态栏会显示"正在重连中继…"，连上后自动变绿。）
 
 ## 6. 防蹭用：设备注册口令（强烈建议设置）
 
@@ -134,21 +154,22 @@ Environment=RELAY_REG_TOKEN=换成一串随机口令
 然后在 dsh"远程"面板的"设备注册口令"里填同一个口令，保存即可。
 口令错误会被计入限速（同 IP 连续失败会被冷却），口令换了随时在服务器改，已配对设备不用动。
 
-## 6.1 完整模式：手机上用官方原版界面（默认开启）
+## 6.1 手机界面：dsh 官方原版界面（唯一界面，自动启用）
 
-除了轻量 UI，还支持把 **dsh 官方 Web 界面原样搬到中继上**：插件自动把本机 dsh 服务出的
-served 页面（含 `__DSH_BOOT__` 启动清单）和全部静态资产推送到服务器落盘托管
-（`data/assets/full/`，首次 ~10MB 走一次家宽上行，之后仅 dsh 升级导致指纹变化时增量重推），
+手机上跑的就是 **dsh 官方 Web 界面原样搬到中继上**（2026-10 起轻量聊天 UI 已移除，官方界面是唯一入口）：
+插件自动把本机 dsh 服务出的 served 页面（含 `__DSH_BOOT__` 启动清单）和全部静态资产推送到服务器落盘托管
+（`data/assets/full/`，首次 ~25MB 走一次家宽上行，之后仅 dsh 升级导致指纹变化时增量重推），
 手机的 API 请求与 WebSocket 由 relay 桥接回家里，走的是同一条已有的出站隧道。
 
-- 手机入口：配对后的轻量 UI 右上角"**官方界面**"按钮（凭配对时换取的 HttpOnly cookie 进入，
-  `https://你的域名/remote/full/`）；
-- dsh 侧开关："远程"面板 →"完整模式：推送官方 UI 到服务器"（`syncFullUi`，默认开）；
+- 手机入口：扫码后先看到 **配对网关页**（四步过渡：连接中继 → 设备鉴权 → 等待桌面端配对 → 打开官方界面），
+  完成后自动跳转 `https://你的域名/remote/full/`，无需任何手动操作；
+- 无需开关：资产推送恒开（旧版本的 `syncFullUi` 配置键仍在文件里兼容保留，但已不生效）；
 - 服务器无感知：不需要任何配置，资产存在 `data/` 卷里，容器重建不丢；
-- 手机上官方界面的所有调用都过桥（HTTP 一元 + `/api/remote.mux` WebSocket），与桌面端一致。
+- 手机上官方界面的所有调用都过桥（HTTP 一元 + `/api/remote.mux` WebSocket），与桌面端一致；
+- 可选"精简官方界面"：隐藏设置/插件/工作区创建，只留会话与对话（面板勾选）。
 
-安全注意：完整模式与轻量模式同权——cookie 绑定配对会话，relay 重启后需在轻量 UI
-重新连接一次自动换新 cookie；切勿把 `/remote/full/` 直接暴露给未配对访客（默认已有门禁）。
+安全注意：官方 UI 入口有 cookie 门禁——cookie 绑定配对会话（HttpOnly，7 天有效），
+relay 重启后网关页会自动重新配对换新 cookie；切勿把 `/remote/full/` 直接暴露给未配对访客（默认已有门禁）。
 
 ## 7. 数据与安全
 

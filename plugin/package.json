@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-relay",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "DSH 远程控制插件（中继版）：对标 ZCode 远程控制 —— 轻量手机 UI 托管在自有服务器的中继上，dsh 插件出站连接中继，隧道只传消息增量；支持远程查看/续写会话、流式输出、手机批准工具调用、附件按需拉取。",
   "type": "module",
   "main": "lib/index.mjs",

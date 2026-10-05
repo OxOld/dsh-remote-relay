@@ -8,7 +8,11 @@ relay 与 Web UI **只按本文档实现**，永不 import dsh 的任何东西�
 | 角色 | 是谁 | 连接方向 |
 |---|---|---|
 | `device` | dsh 里的 cordis 插件 | 出站 WSS 连 relay |
-| `terminal` | 手机/浏览器上的轻量 UI | 直接 HTTPS/WSS 连 relay |
+| `terminal` | 手机/浏览器上的配对网关页（`/remote/`） | 直接 HTTPS/WSS 连 relay |
+
+> 2026-10 起：轻量聊天 UI 已移除，手机界面为官方 UI（`/remote/full/`，凭 cookie 访问，不占 terminal 角色）。
+> 网关页只用 §1 的配对信令、`term-token` 与 `pair` 帧；§2 的会话数据帧（bootstrap/snapshot/delta…）
+> 当前无 UI 消费，作为轻量客户端的预留通道继续保留。
 
 约定：所有控制/数据消息都是 **JSON 文本帧**；`sid` 只含 `[A-Za-z0-9_-]`（8~32 字符）；
 `base64url` 指 RFC 4648 §5 无填充；时间戳均为 epoch 毫秒。
@@ -145,7 +149,7 @@ Msg  = { seq: number,                    // 会话事件序号（幂等/去重�
    `{type:'term-token', token}`。
 2. terminal 以 `POST /remote/full-auth`（请求头 `authorization: Bearer <termToken>`）换取
    Cookie：`rrm_full=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800[; Secure]`。
-   轻量 UI 在每次连接 ready 后自动换取。
+   配对网关页在 proof 通过（ready）后自动换取，配对完成即跳转官方界面。
 3. 所有 `/remote/full/*`（页面、资产、桥接）要求有效 `rrm_full` cookie，且对应 sid 的
    device 必须在线（桥接时）。cookie 失效（relay 重启）→ 页面导航 302 回 `/remote/`，
    XHR 401；重新配对后自动恢复。
@@ -207,12 +211,11 @@ device 侧仅接受 `path` 以 `api/` 开头的桥；并发桥 ≤ 16，超出�
 
 | 端点 | 说明 |
 |---|---|
-| `GET /remote/` | 轻量 UI（index.html，no-cache） |
-| `GET /remote/app.js` `/remote/style.css` | UI 资源（no-cache，小文件） |
-| `GET /remote/vendor/*` | 第三方库（immutable 30d，文件名带版本） |
-| `GET /remote/full/` | 完整模式官方 UI（cookie 门禁，index no-cache，`/remote/full/assets/*` immutable） |
+| `GET /remote/` | 配对网关页（index.html，no-cache）：配对 → 换 cookie → 跳官方界面 |
+| `GET /remote/app.js` | 网关页脚本（no-cache，小文件） |
+| `GET /remote/full/` | 官方 UI（cookie 门禁，index no-cache，`/remote/full/assets/*` immutable） |
 | `ANY /remote/full/api/*` | HTTP 桥（cookie 门禁 → device） |
 | `WS /remote/full/api/remote.mux` | WS 桥 Upgrade（cookie 门禁 → device） |
 | `POST /remote/full-auth` | term-token 换 `rrm_full` cookie |
-| `GET /remote/ws` → Upgrade | 中继 WebSocket（轻量 UI） |
+| `GET /remote/ws` → Upgrade | 中继 WebSocket（device 与网关页） |
 | `GET /healthz` | `ok` |

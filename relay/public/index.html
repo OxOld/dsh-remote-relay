@@ -2,18 +2,72 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<meta name="theme-color" content="#0f1115">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#131417">
 <title>dsh 远程控制</title>
-<link rel="stylesheet" href="/remote/style.css">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #131417; color: #e8eaf0;
+    font-family: -apple-system, 'PingFang SC', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .card {
+    width: min(430px, 100%); background: #212227; border: 1px solid rgba(255,255,255,.07);
+    border-radius: 14px; padding: 22px 22px 18px; box-shadow: 0 12px 40px rgba(0,0,0,.45);
+  }
+  .head { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 600; }
+  .head .dot { width: 9px; height: 9px; border-radius: 50%; background: #adb5bd; flex: none; }
+  .head .dot.ok { background: #d9480f; }
+  .head .dot.err { background: #e03131; }
+  .sub { margin: 8px 0 16px; font-size: 12.5px; color: #9aa0ab; line-height: 1.55; }
+  .step {
+    display: flex; align-items: center; gap: 9px; background: #2a2b31; border-radius: 9px;
+    padding: 10px 13px; margin-top: 8px; font-size: 13px; color: #7d828d; transition: color .2s;
+  }
+  .step .mark { flex: none; width: 16px; text-align: center; font-size: 12px; }
+  .step.active { color: #e8eaf0; }
+  .step.active .mark::after {
+    content: ''; display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    border: 2px solid #d9480f; border-top-color: transparent; animation: spin .8s linear infinite; vertical-align: -2px;
+  }
+  .step.done { color: #9aa0ab; }
+  .step.done .mark { color: #51cf66; }
+  .step.err { color: #e03131; }
+  .step.err .mark { color: #e03131; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .foot { margin-top: 14px; font-size: 11.5px; color: #6b7078; text-align: center; line-height: 1.6; }
+  .foot a { color: #868e96; cursor: pointer; text-decoration: underline; }
+  .foot a:hover { color: #adb5bd; }
+  .form { margin-top: 14px; }
+  .form input {
+    width: 100%; border: 1px solid rgba(255,255,255,.14); background: #1a1b1f; color: #e8eaf0;
+    border-radius: 8px; padding: 9px 11px; font-size: 13px; outline: none; margin-top: 8px;
+  }
+  .form input:focus { border-color: #d9480f; }
+  .form button {
+    width: 100%; border: none; border-radius: 9px; padding: 10px 0; margin-top: 10px;
+    font-size: 13.5px; font-weight: 600; cursor: pointer; background: #d9480f; color: #fff; font-family: inherit;
+  }
+  .form button:active { opacity: .8; }
+  .spin-wrap { text-align: center; padding: 8px 0 2px; }
+</style>
 </head>
 <body>
-<div id="app">
-  <div class="boot"><div class="spin"></div><p>正在加载…</p></div>
+<div class="card" id="card">
+  <div class="head"><span class="dot" id="head-dot"></span><span id="head-text">正在连接中继服务…</span></div>
+  <div class="sub" id="head-sub">正在与中继服务器建立连接。</div>
+  <div id="steps"></div>
+  <div class="form" id="pair-form" hidden>
+    <input id="f-sid" placeholder="设备 ID (sid)" autocomplete="off">
+    <input id="f-hash" placeholder="配对 hash（来自二维码）" autocomplete="off">
+    <input id="f-name" placeholder="备注名（可选）" autocomplete="off">
+    <button id="f-go">配对并进入</button>
+  </div>
+  <div class="foot" id="foot"></div>
 </div>
-<div id="lightbox" hidden><img alt=""><div class="lb-meta"></div></div>
-<script src="/remote/vendor/marked-12.0.2.min.js"></script>
-<script src="/remote/vendor/purify-3.1.6.min.js"></script>
 <script type="module" src="/remote/app.js"></script>
 </body>
 </html>

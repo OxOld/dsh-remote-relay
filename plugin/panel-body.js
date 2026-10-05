@@ -91,7 +91,7 @@ function rrmPaint() {
     f.deviceName.value = info.deviceName || '';
     f.autoConnect.checked = !!info.autoConnect;
     f.approveFromPhone.checked = !!info.approveFromPhone;
-    if (f.syncFullUi) f.syncFullUi.checked = !!info.syncFullUi;
+    if (f.syncFullUi) f.syncFullUi.checked = !!info.syncFullUi;   // 勾选已移除，兼容旧缓存页面
     if (f.fullUiMinimal) f.fullUiMinimal.checked = !!info.fullUiMinimal;
     f.approvalTimeoutMs.value = info.approvalTimeoutMs || 120000;
     f.regToken.value = info.regToken || '';
@@ -176,13 +176,6 @@ function rrmBuildPanel() {
   row2.appendChild(rrmEl('label', null, '允许在手机上批准工具调用'));
   row2.lastChild.htmlFor = 'rrm-ap';
   f.appendChild(row2);
-  var row3 = rrmEl('div', 'rrm-row');
-  f.syncFullUi = document.createElement('input');
-  f.syncFullUi.type = 'checkbox'; f.syncFullUi.id = 'rrm-sf';
-  row3.appendChild(f.syncFullUi);
-  row3.appendChild(rrmEl('label', null, '完整模式：推送官方 UI 到服务器（手机用原版界面）'));
-  row3.lastChild.htmlFor = 'rrm-sf';
-  f.appendChild(row3);
   var row3b = rrmEl('div', 'rrm-row');
   f.fullUiMinimal = document.createElement('input');
   f.fullUiMinimal.type = 'checkbox'; f.fullUiMinimal.id = 'rrm-km';
@@ -200,7 +193,6 @@ function rrmBuildPanel() {
       deviceName: f.deviceName.value.trim(),
       autoConnect: !!f.autoConnect.checked,
       approveFromPhone: !!f.approveFromPhone.checked,
-      syncFullUi: !!f.syncFullUi.checked,
       fullUiMinimal: !!f.fullUiMinimal.checked,
       approvalTimeoutMs: Number(f.approvalTimeoutMs.value) || 120000,
       regToken: f.regToken.value.trim(),
@@ -217,7 +209,7 @@ function rrmBuildPanel() {
   f.appendChild(reset);
   sec2.appendChild(f);
   rrmPanel.appendChild(sec2);
-  rrmPanel.appendChild(rrmEl('div', 'rrm-sec rrm-note', '手机扫码后即可远程查看会话、发送消息、批准工具调用。流量只走中继的消息增量，静态 UI 由服务器直接提供。'));
+  rrmPanel.appendChild(rrmEl('div', 'rrm-sec rrm-note', '手机扫码完成配对后自动进入 dsh 官方界面（服务器托管静态 UI，调用经中继桥回家里）。也可在手机上批准工具调用。'));
   document.body.appendChild(rrmPanel);
 }
 
@@ -256,8 +248,8 @@ function rrmFastPoll() {
 }
 
 function rrmBoot() {
-  // 完整模式（手机上的官方 UI）：面板由轻量 UI 承担，这里不再注入悬浮按钮，
-  // 否则每 10s 轮询 /remote-relay/info 会在中继侧打出无意义的 404
+  // 手机上的官方 UI（/remote/full/）：不注入悬浮按钮——配对已在网关页完成，
+  // 注入的按钮会破坏官方界面，且每 10s 轮询 /remote-relay/info 会在中继侧打出无意义的 404
   if (location.pathname.indexOf('/remote/full/') === 0) return;
   var style = document.createElement('style');
   style.textContent = RRM_CSS;

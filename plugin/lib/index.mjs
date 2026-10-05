@@ -190,7 +190,8 @@ export function apply(ctx, rawConfig) {
     getPort: () => resolvedTargetPort,
     refreshSessionCookie,
     invalidateCookie: () => { sessionCookie = null; },
-    fullUiEnabled: () => !!config.syncFullUi,
+    // 轻量 UI 已移除，官方 UI 是手机端唯一界面：资产推送恒开
+    fullUiEnabled: () => true,
     fullUiMinimal: () => !!config.fullUiMinimal,
   });
 
