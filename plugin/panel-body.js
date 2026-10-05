@@ -232,6 +232,9 @@ function rrmRefresh() {
 }
 
 function rrmBoot() {
+  // 完整模式（手机上的官方 UI）：面板由轻量 UI 承担，这里不再注入悬浮按钮，
+  // 否则每 10s 轮询 /remote-relay/info 会在中继侧打出无意义的 404
+  if (location.pathname.indexOf('/remote/full/') === 0) return;
   var style = document.createElement('style');
   style.textContent = RRM_CSS;
   document.head.appendChild(style);

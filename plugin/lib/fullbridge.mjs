@@ -15,9 +15,11 @@ const MAX_TOTAL = 128 * 1024 * 1024;
 const MAX_FILES = 800;
 
 const sha8 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8);
+/** 剔除 dsh 的启动注入脚本（按整块 <script> 精确匹配，避免跨标签误吞注入行） */
 const stripBoot = (html) => String(html)
-  .replace(/<script>globalThis\["__DSH_BOOT__"\][\s\S]*?<\/script>/g, '')
-  .replace(/<script>[\s\S]*?__DSH_BOOT_READY__[\s\S]*?<\/script>/g, '');
+  .split(/(<script[\s\S]*?<\/script>)/gi)
+  .filter((seg) => !(/^<script/i.test(seg) && /__DSH_BOOT__|__DSH_BOOT_READY__/.test(seg)))
+  .join('');
 
 /**
  * @param {object} io 宿主注入的运行环境
