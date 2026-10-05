@@ -15,6 +15,11 @@ const MAX_TOTAL = 128 * 1024 * 1024;
 const MAX_FILES = 800;
 
 const sha8 = (buf) => crypto.createHash('sha256').update(buf).digest('hex').slice(0, 8);
+/** 精简模式壳：隐藏"管理入口类"UI（aria-label 跨构建稳定），只留会话树 + 对话 + 输入 */
+const KIOSK_SHIM = '<style id="rrm-kiosk">'
+  + 'button[aria-label="设置"],button[aria-label="添加工作区"],'
+  + 'nav[aria-label="全局面板"]{display:none !important}'
+  + '</style>';
 /** 剔除 dsh 的启动注入脚本（按整块 <script> 精确匹配，避免跨标签误吞注入行） */
 const stripBoot = (html) => String(html)
   .split(/(<script[\s\S]*?<\/script>)/gi)
@@ -24,10 +29,10 @@ const stripBoot = (html) => String(html)
 /**
  * @param {object} io 宿主注入的运行环境
  *   log(msg...), sendData(payload), getPort(), refreshSessionCookie(): Promise<cookie|null>,
- *   invalidateCookie(): void, fullUiEnabled(): bool
+ *   invalidateCookie(): void, fullUiEnabled(): bool, fullUiMinimal(): bool
  */
 export function createFullBridge(io) {
-  const { log, sendData, getPort, refreshSessionCookie, invalidateCookie, fullUiEnabled } = io;
+  const { log, sendData, getPort, refreshSessionCookie, invalidateCookie, fullUiEnabled, fullUiMinimal } = io;
 
   // ── HTTP 桥 ──
   /** reqId → { req?: http.ClientRequest, inflight, paused } */
@@ -304,15 +309,22 @@ export function createFullBridge(io) {
       const st = await waitReply('full-info-state', 15000);
       const cookie = await refreshSessionCookie();
       const indexBuf = await httpGet('/', cookie);
-      const version = 'idx2-' + sha8(stripBoot(indexBuf.toString('utf8')));
+      const indexRaw = indexBuf.toString('utf8');
+      const minimal = !!fullUiMinimal();
+      // 精简模式：推送前把 kiosk 壳注入 index（隐藏设置/插件/添加工作区，只留会话与对话）
+      const indexHtml = minimal && indexRaw.includes('</head>')
+        ? indexRaw.replace('</head>', KIOSK_SHIM + '</head>')
+        : indexRaw;
+      const indexBufFinal = Buffer.from(indexHtml, 'utf8');
+      const version = 'idx2-' + sha8(stripBoot(indexHtml)) + (minimal ? '-k' : '');
       if (st.version === version) {
         log(`full-mode assets up-to-date (v=${version}, ${st.files} files)`);
         return;
       }
       const base = { origin: `http://127.0.0.1:${getPort()}` };
       const origin = base.origin;
-      const paths = collectPaths(indexBuf.toString('utf8'), new URL(origin + '/'), new Set(['/']));
-      collectBootUrls(indexBuf.toString('utf8'), new URL(origin + '/'), paths);
+      const paths = collectPaths(indexHtml, new URL(origin + '/'), new Set(['/']));
+      collectBootUrls(indexHtml, new URL(origin + '/'), paths);
       // CSS 内引用再扩散一层
       for (const p2 of [...paths]) {
         if (!p2.endsWith('.css')) continue;
@@ -323,8 +335,8 @@ export function createFullBridge(io) {
       }
       const list = [...paths].filter((p2) => p2 !== '/');
       if (list.length > MAX_FILES) throw new Error('too many assets: ' + list.length);
-      const files = [{ path: 'index.html', buf: indexBuf }];
-      let total = indexBuf.length;
+      const files = [{ path: 'index.html', buf: indexBufFinal }];
+      let total = indexBufFinal.length;
       let skipped = 0;
       for (const p2 of list) {
         let buf;

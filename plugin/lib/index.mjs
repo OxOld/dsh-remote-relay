@@ -75,6 +75,7 @@ export function apply(ctx, rawConfig) {
     approvalTimeoutMs: cfg.approvalTimeoutMs ?? 120000,
     regToken: cfg.regToken ?? '',   // 中继的设备注册口令（服务器设置 RELAY_REG_TOKEN 时必填）
     syncFullUi: cfg.syncFullUi ?? true,   // 完整模式：把官方 UI 资产推送到 relay 托管
+    fullUiMinimal: cfg.fullUiMinimal ?? true,   // 精简官方界面：隐藏设置/插件/工作区创建
   };
   try {
     if (fs.existsSync(cfgFilePath)) {
@@ -190,6 +191,7 @@ export function apply(ctx, rawConfig) {
     refreshSessionCookie,
     invalidateCookie: () => { sessionCookie = null; },
     fullUiEnabled: () => !!config.syncFullUi,
+    fullUiMinimal: () => !!config.fullUiMinimal,
   });
 
   // ── 连接管理 ────────────────────────────────────────────────────────────
@@ -224,6 +226,7 @@ export function apply(ctx, rawConfig) {
     approvalTimeoutMs: config.approvalTimeoutMs,
     regToken: config.regToken || '',
     syncFullUi: !!config.syncFullUi,
+    fullUiMinimal: !!config.fullUiMinimal,
     error: lastError,
   });
 
@@ -651,7 +654,9 @@ export function apply(ctx, rawConfig) {
     if (typeof patch.deviceName === 'string') { config.deviceName = truncate(patch.deviceName.trim(), 64) || '我的 dsh'; }
     if (typeof patch.autoConnect === 'boolean') config.autoConnect = patch.autoConnect;
     if (typeof patch.approveFromPhone === 'boolean') config.approveFromPhone = patch.approveFromPhone;
-    if (typeof patch.syncFullUi === 'boolean') config.syncFullUi = patch.syncFullUi;
+    let fullModeChanged = false;
+    if (typeof patch.syncFullUi === 'boolean' && patch.syncFullUi !== config.syncFullUi) { config.syncFullUi = patch.syncFullUi; fullModeChanged = true; }
+    if (typeof patch.fullUiMinimal === 'boolean' && patch.fullUiMinimal !== config.fullUiMinimal) { config.fullUiMinimal = patch.fullUiMinimal; fullModeChanged = true; }
     if (Number.isFinite(patch.approvalTimeoutMs)) config.approvalTimeoutMs = Math.max(5000, Math.min(patch.approvalTimeoutMs, 600000));
     if (typeof patch.regToken === 'string') {
       const v = patch.regToken.trim();
@@ -663,6 +668,7 @@ export function apply(ctx, rawConfig) {
       need = true;
       log('pairing reset: new sid generated');
     }
+    if (fullModeChanged && wsOpen) void fullBridge.syncFullAssets();   // 模式变化 → 立即按新指纹重推
     return need;
   }
 

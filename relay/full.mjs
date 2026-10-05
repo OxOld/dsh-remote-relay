@@ -57,12 +57,22 @@ export function rewriteIndex(html) {
  */
 export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady, log }) {
   const assetsDir = path.join(dataDir, 'assets');
-  const liveDir = path.join(assetsDir, 'full');
-  const metaFile = path.join(assetsDir, 'full.json');
+  /** 资产按设备 sid 隔离：assets/<sid>/full —— 多设备/多用户互不覆盖（cookie 里自带 sid） */
+  const liveDirOf = (sid) => path.join(assetsDir, sid, 'full');
+  const metaFileOf = (sid) => path.join(assetsDir, sid, 'full.json');
 
-  // ── 托管状态 ──
-  let liveMeta = { version: null, files: 0, bytes: 0 };
-  try { const m = JSON.parse(fs.readFileSync(metaFile, 'utf8')); if (m && typeof m.version === 'string') liveMeta = m; } catch { /* 首次无 */ }
+  // ── 托管状态（每设备一份）──
+  const liveMetas = new Map();   // sid → {version, files, bytes}
+  const loadMeta = (sid) => {
+    if (liveMetas.has(sid)) return liveMetas.get(sid);
+    let m = { version: null, files: 0, bytes: 0 };
+    try {
+      const raw = JSON.parse(fs.readFileSync(metaFileOf(sid), 'utf8'));
+      if (raw && typeof raw.version === 'string') m = raw;
+    } catch { /* 首次无 */ }
+    liveMetas.set(sid, m);
+    return m;
+  };
 
   /** pushId → { sid, dir, files:Map(path→{size,sha8}), got:Map(path→{fd,bytes}), total, version } */
   const pushes = new Map();
@@ -119,6 +129,8 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
       ? 'enc-' + crypto.createHash('sha256').update(rel).digest('hex').slice(0, 12)
       : path.normalize(rel).replace(/^([/\\])+/, '');
     if (!isCombo && clean.split(/[\\/]/).includes('..')) { res.writeHead(400).end(); return; }
+    const liveDir = liveDirOf(sid);
+    if (!fs.existsSync(liveDir)) { res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing (等待设备推送，或开启插件 syncFullUi)'); return; }
     const file = path.join(liveDir, clean);
     if (!isCombo && !file.startsWith(liveDir + path.sep)) { res.writeHead(400).end(); return; }
     let buf;
@@ -192,6 +204,8 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     if (!push || push.sid !== conn._fullSid) { err(conn, 'asset-push', '无此推送'); return; }
     for (const [p2, rec] of push.got) if (rec.bytes !== -1) { err(conn, 'asset-incomplete', `未完成 ${p2}`); return; }
     if (push.got.size !== push.files.size) { err(conn, 'asset-incomplete', `缺 ${push.files.size - push.got.size} 个文件`); return; }
+    const liveDir = liveDirOf(push.sid);
+    fs.mkdirSync(path.dirname(liveDir), { recursive: true });
     const trash = path.join(assetsDir, '.trash-' + id);
     fs.rmSync(trash, { recursive: true, force: true });
     let moved = false;
@@ -205,10 +219,11 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     }
     fs.rmSync(trash, { recursive: true, force: true });
     const bytes = [...push.files.values()].reduce((a, f) => a + f.size, 0);
-    liveMeta = { version: String(p.version || push.version), files: push.files.size, bytes };
-    try { fs.writeFileSync(metaFile, JSON.stringify(liveMeta)); } catch { /* ignore */ }
+    const liveMeta = { version: String(p.version || push.version), files: push.files.size, bytes };
+    try { fs.writeFileSync(metaFileOf(push.sid), JSON.stringify(liveMeta)); } catch { /* ignore */ }
+    liveMetas.set(push.sid, liveMeta);
     pushes.delete(id);
-    log(`full-mode assets committed: v=${liveMeta.version} files=${liveMeta.files} bytes=${liveMeta.bytes}`);
+    log(`full-mode assets committed for ${push.sid}: v=${liveMeta.version} files=${liveMeta.files} bytes=${liveMeta.bytes}`);
     send(conn, { type: 'asset-committed', pushId: id, version: liveMeta.version, files: liveMeta.files, bytes: liveMeta.bytes });
   }
   function abortPush(id) {
@@ -364,7 +379,7 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
   function deviceAsset(conn, sid, p) {
     conn._fullSid = sid;   // 后续帧以此校验归属
     switch (p.type) {
-      case 'full-info': send(conn, { type: 'full-info-state', version: liveMeta.version, files: liveMeta.files, bytes: liveMeta.bytes }); return;
+      case 'full-info': { const m = loadMeta(sid); send(conn, { type: 'full-info-state', version: m.version, files: m.files, bytes: m.bytes }); return; }
       case 'asset-begin': beginPush(conn, sid, p); return;
       case 'asset-put': putChunk(conn, p); return;
       case 'asset-end': endFile(conn, p); return;
@@ -407,7 +422,11 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     serveAsset(req, res, url);
   }
   const isFullApiUpgrade = (pathname) => pathname.startsWith(FULL_BASE + '/api/');
-  const info = () => ({ ...liveMeta, pushes: pushes.size, termTokens: termTokens.size, httpPending: httpPending.size, wsBridges: wsBridges.size });
+  const info = () => ({
+    devicesWithAssets: [...liveMetas.values()].filter((m) => m.version).length,
+    assetVersions: [...new Set([...liveMetas.values()].map((m) => m.version).filter(Boolean))].length,
+    pushes: pushes.size, termTokens: termTokens.size, httpPending: httpPending.size, wsBridges: wsBridges.size,
+  });
 
   return { handleHttp, isFullApiUpgrade, deviceAsset, deviceBridge, deviceOffline, issueTermToken, bridgeWs, info };
 }

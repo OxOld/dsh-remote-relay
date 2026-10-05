@@ -91,6 +91,7 @@ function rrmPaint() {
     f.autoConnect.checked = !!info.autoConnect;
     f.approveFromPhone.checked = !!info.approveFromPhone;
     if (f.syncFullUi) f.syncFullUi.checked = !!info.syncFullUi;
+    if (f.fullUiMinimal) f.fullUiMinimal.checked = !!info.fullUiMinimal;
     f.approvalTimeoutMs.value = info.approvalTimeoutMs || 120000;
     f.regToken.value = info.regToken || '';
   }
@@ -181,6 +182,13 @@ function rrmBuildPanel() {
   row3.appendChild(rrmEl('label', null, '完整模式：推送官方 UI 到服务器（手机用原版界面）'));
   row3.lastChild.htmlFor = 'rrm-sf';
   f.appendChild(row3);
+  var row3b = rrmEl('div', 'rrm-row');
+  f.fullUiMinimal = document.createElement('input');
+  f.fullUiMinimal.type = 'checkbox'; f.fullUiMinimal.id = 'rrm-km';
+  row3b.appendChild(f.fullUiMinimal);
+  row3b.appendChild(rrmEl('label', null, '精简官方界面（隐藏设置/插件/工作区创建，只留会话与对话）'));
+  row3b.lastChild.htmlFor = 'rrm-km';
+  f.appendChild(row3b);
   var save = rrmEl('button', 'rrm-btn', '保存并重连');
   save.type = 'submit';
   save.onclick = function (ev) {
@@ -192,6 +200,7 @@ function rrmBuildPanel() {
       autoConnect: !!f.autoConnect.checked,
       approveFromPhone: !!f.approveFromPhone.checked,
       syncFullUi: !!f.syncFullUi.checked,
+      fullUiMinimal: !!f.fullUiMinimal.checked,
       approvalTimeoutMs: Number(f.approvalTimeoutMs.value) || 120000,
       regToken: f.regToken.value.trim(),
     }, save);
