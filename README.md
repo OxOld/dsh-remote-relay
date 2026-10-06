@@ -7,31 +7,41 @@
 
 与旧的 frp 全量反代方案（dsh-web-remote-frp）的本质区别见 [docs/DESIGN.zh.md](docs/DESIGN.zh.md)。
 
+```mermaid
+flowchart TB
+    phone["手机浏览器<br/>二维码配对 · 官方 UI 界面"]
+    subgraph relay["公网服务器 relay.mjs（单文件零依赖）"]
+        direction TB
+        gw["配对网关页 /remote/<br/>四步过渡动画 → 跳官方界面"]
+        full["官方 UI 托管 /remote/full/<br/>静态资产由插件推送落盘"]
+        ws["WS 中继 /remote/ws<br/>桥接 device ↔ terminal"]
+    end
+    plugin["dsh 插件（cordis，Host 进程内）"]
+    dsh["本机 dsh 服务<br/>会话 / 历史 / 流式 / 批准 / 附件"]
+
+    phone -- "HTTPS" --> relay
+    plugin -- "出站 WSS（自动重连 + 退避）" --> ws
+    plugin -. "进程内直读，零代理" .-> dsh
 ```
-手机浏览器 ──HTTPS──▶ 公网服务器 relay.mjs（单文件零依赖）
-   二维码配对            ├─ 配对网关页（/remote/，四步过渡动画 → 跳官方界面）
-   官方 UI 界面          ├─ 官方 UI 托管（/remote/full/，插件推送落盘）
-                         └─ WS 中继（/remote/ws）桥接 device ↔ terminal
-                              ▲
-dsh 插件（cordis）──出站 WSS──┘   官方 UI 的 API/WS 经桥接回到本机 dsh，与桌面端完全一致
-```
+
+官方 UI 的所有 API/WS 调用由 relay 经同一条出站隧道桥回本机 dsh，与桌面端完全一致。
 
 ## 目录结构
 
 ```
-docs/PROTOCOL.md        三方协议契约（relay/UI 只按它实现，永不 import dsh）
-docs/DESIGN.zh.md       架构决策记录（为什么弃用全量代理；为何移除轻量 UI）
-relay/relay.mjs         中继服务（单文件，零依赖，Node ≥ 20）
-relay/public/           配对网关页（/remote/，配对 → 换 cookie → 跳官方界面）
-relay/full.mjs          官方 UI 托管：资产落盘 + cookie 门禁 + HTTP/WS 桥接（由 relay.mjs 挂载）
-relay/Dockerfile 等     Dockerfile + docker-compose.yml
-relay/deploy/           部署文档 + systemd 样例
-plugin/                 dsh 插件（npm 包 dsh-remote-relay）
-plugin/lib/index.mjs    cordis 插件主体
-plugin/lib/projector.mjs 会话事件 → 远程消息投影器（遗留协议层，保留兼容）
+docs/PROTOCOL.md          三方协议契约（relay/UI 只按它实现，永不 import dsh）
+docs/DESIGN.zh.md         架构决策记录（为什么弃用全量代理；为何移除轻量 UI）
+relay/relay.mjs           中继服务（单文件，零依赖，Node ≥ 20）
+relay/public/             配对网关页（/remote/，配对 → 换 cookie → 跳官方界面）
+relay/full.mjs            官方 UI 托管：资产落盘 + cookie 门禁 + HTTP/WS 桥接（由 relay.mjs 挂载）
+relay/Dockerfile          Dockerfile + docker-compose.yml 等编排文件
+relay/deploy/             部署文档 + systemd 样例
+plugin/                   dsh 插件（npm 包 dsh-remote-relay）
+plugin/lib/index.mjs      cordis 插件主体
+plugin/lib/projector.mjs  会话事件 → 远程消息投影器（遗留协议层，保留兼容）
 plugin/lib/fullbridge.mjs 官方 UI 资产推送 + HTTP/WS 桥接
-plugin/lib/panel.mjs    dsh 内注入的二维码/设置面板（自动组装）
-plugin/lib/ws.mjs       零依赖 WebSocket 客户端
+plugin/lib/panel.mjs      dsh 内注入的二维码/设置面板（自动组装）
+plugin/lib/ws.mjs         零依赖 WebSocket 客户端
 ```
 
 ## 功能
