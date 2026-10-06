@@ -1,15 +1,13 @@
-# 中继镜像自动构建：改 relay/ 下代码推到 main 即自动打包并推送 ghcr.io
+# 中继镜像自动构建：打 relay-v* tag（如 relay-v20261006）推到 GitHub 即自动打包并推送 ghcr.io
 # 镜像：ghcr.io/oxold/dsh-remote-relay（GitHub 自动带权限，公开仓库免费；amd64 + arm64）
-# 标签：YYYYMMDD（同日覆盖）、YYYYMMDD-sha8（精确到提交）、latest
+# 镜像标签：tag 去掉 relay-v 前缀（如 20261006）+ latest；手动触发（无 tag）时退回 YYYYMMDD
 # 注意：首次运行后需在 GitHub → Packages 里把该镜像可见性设为 Public（默认建为私有）
 name: relay-image
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'relay/**'
-      - '.github/workflows/relay-image.yml'
+    tags:
+      - 'relay-v*'
   workflow_dispatch:
 
 concurrency:
@@ -29,8 +27,11 @@ jobs:
         name: 生成镜像名与版本标签
         run: |
           echo "ghcr=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-          echo "date=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
-          echo "full=$(date +%Y%m%d)-$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_NAME" == relay-v* ]]; then
+            echo "ver=${GITHUB_REF_NAME#relay-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ver=$(date +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: docker/setup-buildx-action@v3
 
@@ -48,8 +49,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.date }}
-            ${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.full }}
+            ${{ steps.meta.outputs.ghcr }}:${{ steps.meta.outputs.ver }}
             ${{ steps.meta.outputs.ghcr }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

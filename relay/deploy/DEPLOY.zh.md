@@ -118,10 +118,16 @@ services:
 
 升级 = 改 image tag → `docker compose pull && docker compose up -d`（data 卷不动，设备无需重新配对）。
 
-**镜像自动构建（GitHub Actions）**：仓库公开，改 `relay/` 下代码推到 main 会自动构建并推送到
-`ghcr.io/oxold/dsh-remote-relay`（标签 `YYYYMMDD`、`YYYYMMDD-sha8`、`latest`，amd64 + arm64，
-无需任何 secrets 配置）。首次运行后到 GitHub → Packages 把镜像可见性设为 Public；
-构建状态见仓库 Actions 页，也可手动触发（Run workflow）。
+**镜像自动构建（GitHub Actions）**：仓库公开，打 `relay-v*` tag 推到 GitHub 即自动构建并推送到
+`ghcr.io/oxold/dsh-remote-relay`（amd64 + arm64，无需任何 secrets 配置），镜像标签取 tag 去掉
+`relay-v` 前缀：
+
+```bash
+git tag relay-v20261006 && git push origin relay-v20261006   # → ghcr 镜像 20261006 + latest
+```
+
+平时改文档/插件不会触发构建；想重跑可在 Actions 页 Run workflow（无 tag 时镜像标签按当天日期）。
+首次运行后到 GitHub → Packages 把镜像可见性设为 Public，构建状态也在 Actions 页看。
 
 ## 5. dsh 插件侧配置
 

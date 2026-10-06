@@ -50,7 +50,7 @@ plugin/lib/ws.mjs       零依赖 WebSocket 客户端
 
 1. **部署中继**（你的公网服务器）：见 [relay/deploy/DEPLOY.zh.md](relay/deploy/DEPLOY.zh.md)；
    最省事：`docker run -d -p 8787:8787 -v ./data:/app/data ghcr.io/oxold/dsh-remote-relay:latest`
-   （推 main 自动构建，见仓库 Actions）；
+   （打 `relay-v*` tag 自动构建，见仓库 Actions）；
 2. **安装插件**：`dsh plugin --profile desktop add "github:OxOld/dsh-remote-relay#path:plugin"`；
 3. dsh 内打开"远程"面板 → 填中继地址（如 `http://你的域名:8787`）与注册口令 → 保存并重连；
 4. 手机扫二维码 → 四步配对 → 自动进入官方界面。
