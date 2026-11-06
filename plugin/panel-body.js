@@ -30,6 +30,11 @@ var RRM_CSS =
   '#rrm-panel canvas{display:block;margin:10px auto 6px;background:#fff;border-radius:8px;padding:6px}' +
   '#rrm-panel .rrm-url{word-break:break-all;font-size:10.5px;opacity:.6;text-align:center}' +
   '#rrm-panel .rrm-note{font-size:11px;opacity:.6;margin-top:6px;line-height:1.5}' +
+  '#rrm-panel .rrm-switch{display:flex;align-items:center;gap:8px;margin:0 0 9px;font-size:13px;font-weight:700}' +
+  '#rrm-panel .rrm-switch .rrm-swbtn{margin-left:auto;border:none;border-radius:15px;padding:6px 16px;font-size:12.5px;' +
+  'font-weight:700;cursor:pointer;font-family:inherit;color:#fff;background:#4c6ef5}' +
+  '#rrm-panel .rrm-switch .rrm-swbtn.on{background:#e03131}' +
+  '#rrm-panel .rrm-switch .rrm-swbtn:disabled{opacity:.55}' +
   '#rrm-panel .rrm-fold{display:flex;align-items:center;padding:11px 16px;font-size:13px;font-weight:600;cursor:pointer;border-bottom:1px solid rgba(128,128,128,.12);user-select:none}' +
   '#rrm-panel .rrm-fold .rrm-chev{margin-left:auto;opacity:.55;font-size:11px;transition:transform .15s}' +
   '#rrm-panel .rrm-fold.open .rrm-chev{transform:rotate(90deg)}' +
@@ -71,16 +76,26 @@ function rrmDrawQr(canvas, url) {
 function rrmPaint() {
   if (!rrmPanel || !rrmInfo) return;
   var info = rrmInfo;
+  var on = !!info.enabled;
   var dot = document.getElementById('rrm-fab-dot');
-  if (dot) dot.className = info.connected ? 'on' : '';
+  if (dot) dot.className = (on && info.connected) ? 'on' : '';
+  var swBtn = rrmPanel.querySelector('#rrm-sw-btn');
+  var swText = rrmPanel.querySelector('#rrm-sw-text');
+  var swDot = rrmPanel.querySelector('#rrm-sw-dot');
+  if (swBtn) { swBtn.textContent = on ? '停止' : '启用'; swBtn.className = 'rrm-swbtn' + (on ? ' on' : ''); }
+  if (swText) swText.textContent = on ? '远程控制已启用' : '远程控制已停止';
+  if (swDot) swDot.className = 'rrm-dots' + (on ? ' on' : '');
   var st = rrmPanel.querySelector('#rrm-status');
   if (st) {
-    if (!info.configured) st.innerHTML = '<span class="rrm-dots"></span>未配置中继，请在下方填写';
+    if (!on) st.innerHTML = '<span class="rrm-dots"></span>已停止：不连接中继、不上传界面资产';
+    else if (!info.configured) st.innerHTML = '<span class="rrm-dots"></span>未配置中继，请在下方填写';
     else if (info.connected && info.terminal) st.innerHTML = '<span class="rrm-dots on"></span>手机已连接';
     else if (info.connected) st.innerHTML = '<span class="rrm-dots on"></span>已连接中继，等待手机扫码';
     else if (Date.now() - rrmLastSaveAt < 8000) st.innerHTML = '<span class="rrm-dots"></span>已保存，正在重连中继…';
     else st.innerHTML = '<span class="rrm-dots"></span>未连接：' + (info.error || '请检查中继地址');
   }
+  var saveBtn = rrmPanel.querySelector('#rrm-save');
+  if (saveBtn) saveBtn.textContent = on ? '保存并重连' : '保存';
   var qrbtn = rrmPanel.querySelector('#rrm-qrbtn');
   var qrWrap = rrmPanel.querySelector('#rrm-qr');
   if (qrbtn) {
@@ -105,7 +120,6 @@ function rrmPaint() {
   else if (f) {
     f.relayUrl.value = info.relayUrl || '';
     f.deviceName.value = info.deviceName || '';
-    f.autoConnect.checked = !!info.autoConnect;
     f.approveFromPhone.checked = !!info.approveFromPhone;
     if (f.syncFullUi) f.syncFullUi.checked = !!info.syncFullUi;   // 勾选已移除，兼容旧缓存页面
     if (f.fullUiMinimal) f.fullUiMinimal.checked = !!info.fullUiMinimal;
@@ -130,6 +144,21 @@ function rrmSave(patch, btn) {
   });
 }
 
+// 总开关：立即生效——开 = 连中继并推送界面资产；关 = 断开、不再上传任何东西
+function rrmToggleEnabled(btn) {
+  if (!rrmInfo) return;
+  var want = !rrmInfo.enabled;
+  if (btn) btn.disabled = true;
+  rrmApi('config', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: want }),
+  }).then(function (r) {
+    if (btn) btn.disabled = false;
+    if (r && r.ok) { rrmInfo = r; rrmPaint(); rrmFastPoll(); }
+  }).catch(function () { if (btn) btn.disabled = false; });
+}
+
 function rrmBuildPanel() {
   rrmPanel = rrmEl('div');
   rrmPanel.id = 'rrm-panel';
@@ -140,6 +169,19 @@ function rrmBuildPanel() {
   rrmPanel.appendChild(h);
 
   var sec1 = rrmEl('div', 'rrm-sec');
+  var sw = rrmEl('div', 'rrm-switch');
+  var swDot = rrmEl('span', 'rrm-dots');
+  swDot.id = 'rrm-sw-dot';
+  sw.appendChild(swDot);
+  var swText = rrmEl('span', null, '远程控制已启用');
+  swText.id = 'rrm-sw-text';
+  sw.appendChild(swText);
+  var swBtn = rrmEl('button', 'rrm-swbtn on', '停止');
+  swBtn.type = 'button';
+  swBtn.id = 'rrm-sw-btn';
+  swBtn.onclick = function () { rrmToggleEnabled(swBtn); };
+  sw.appendChild(swBtn);
+  sec1.appendChild(sw);
   var st = rrmEl('div');
   st.id = 'rrm-status';
   sec1.appendChild(st);
@@ -194,13 +236,6 @@ function rrmBuildPanel() {
   f.approvalTimeoutMs = document.createElement('input');
   f.approvalTimeoutMs.type = 'number'; f.approvalTimeoutMs.min = '5000'; f.approvalTimeoutMs.step = '1000';
   mk('手机批准超时（毫秒，超时后回退桌面处理）', f.approvalTimeoutMs);
-  var row1 = rrmEl('div', 'rrm-row');
-  f.autoConnect = document.createElement('input');
-  f.autoConnect.type = 'checkbox'; f.autoConnect.id = 'rrm-ac';
-  row1.appendChild(f.autoConnect);
-  row1.appendChild(rrmEl('label', null, '启动时自动连接中继'));
-  row1.lastChild.htmlFor = 'rrm-ac';
-  f.appendChild(row1);
   var row2 = rrmEl('div', 'rrm-row');
   f.approveFromPhone = document.createElement('input');
   f.approveFromPhone.type = 'checkbox'; f.approveFromPhone.id = 'rrm-ap';
@@ -217,13 +252,13 @@ function rrmBuildPanel() {
   f.appendChild(row3b);
   var save = rrmEl('button', 'rrm-btn', '保存并重连');
   save.type = 'submit';
+  save.id = 'rrm-save';
   save.onclick = function (ev) {
     ev.preventDefault();
     save.disabled = true;
     rrmSave({
       relayUrl: f.relayUrl.value.trim(),
       deviceName: f.deviceName.value.trim(),
-      autoConnect: !!f.autoConnect.checked,
       approveFromPhone: !!f.approveFromPhone.checked,
       fullUiMinimal: !!f.fullUiMinimal.checked,
       approvalTimeoutMs: Number(f.approvalTimeoutMs.value) || 120000,
@@ -241,7 +276,7 @@ function rrmBuildPanel() {
   f.appendChild(reset);
   sec2.appendChild(f);
   rrmPanel.appendChild(sec2);
-  rrmPanel.appendChild(rrmEl('div', 'rrm-sec rrm-note', '手机扫码完成配对后自动进入 dsh 官方界面（服务器托管静态 UI，调用经中继桥回家里）。也可在手机上批准工具调用。'));
+  rrmPanel.appendChild(rrmEl('div', 'rrm-sec rrm-note', '顶部开关决定是否连接中继与上传界面资产：关闭后立即断开、零上传，重启 dsh 沿用上次状态。手机扫码配对后自动进入 dsh 官方界面（服务器托管静态 UI，调用经中继桥回家里）。'));
   document.body.appendChild(rrmPanel);
 }
 

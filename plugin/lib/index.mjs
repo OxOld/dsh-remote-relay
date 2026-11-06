@@ -27,7 +27,7 @@ export const name = 'remote-relay';
 export const inject = ['timer'];
 
 const PROTO = 1;
-const VERSION = '0.1.0';
+const VERSION = '0.1.6';
 const CALLID_ARGS_CAP = 512;
 const CHUNK_B64 = 256 * 1024;   // att-chunk 二进制分块（base64 前）
 
@@ -70,7 +70,11 @@ export function apply(ctx, rawConfig) {
     password: cfg.password ?? '',
     sid: cfg.sid ?? '',
     deviceName: cfg.deviceName ?? '我的 dsh',
-    autoConnect: cfg.autoConnect ?? true,
+    // 总开关：开 = 连接中继 + 推送官方 UI 资产；关 = 立即断开、不再上传任何东西。
+    // 持久化在 tools/remote-relay.json，dsh 重启后沿用上次状态。
+    // 旧配置没有 enabled 键：按老语义 autoConnect 迁移（false = 关闭）。
+    enabled: cfg.enabled ?? (cfg.autoConnect !== false),
+    autoConnect: cfg.autoConnect ?? true,   // 仅保留兼容旧配置，行为由 enabled 决定
     approveFromPhone: cfg.approveFromPhone ?? true,
     approvalTimeoutMs: cfg.approvalTimeoutMs ?? 120000,
     regToken: cfg.regToken ?? '',   // 中继的设备注册口令（服务器设置 RELAY_REG_TOKEN 时必填）
@@ -80,7 +84,12 @@ export function apply(ctx, rawConfig) {
   try {
     if (fs.existsSync(cfgFilePath)) {
       const saved = JSON.parse(fs.readFileSync(cfgFilePath, 'utf8'));
-      if (saved && typeof saved === 'object') Object.assign(config, saved);
+      if (saved && typeof saved === 'object') {
+        // 旧版本文件只有 autoConnect：迁移成总开关（false 表示旧语义"启动不连接"）
+        if (saved.enabled === undefined && saved.autoConnect === false) config.enabled = false;
+        Object.assign(config, saved);
+        if (typeof config.enabled !== 'boolean') config.enabled = true;
+      }
     }
   } catch (e) { log('config load failed:', e.message); }
   const saveFileCfg = () => {
@@ -190,8 +199,8 @@ export function apply(ctx, rawConfig) {
     getPort: () => resolvedTargetPort,
     refreshSessionCookie,
     invalidateCookie: () => { sessionCookie = null; },
-    // 轻量 UI 已移除，官方 UI 是手机端唯一界面：资产推送恒开
-    fullUiEnabled: () => true,
+    // 轻量 UI 已移除，官方 UI 是手机端唯一界面：资产推送恒开（随总开关启停）
+    fullUiEnabled: () => !!config.enabled,
     fullUiMinimal: () => !!config.fullUiMinimal,
   });
 
@@ -216,6 +225,7 @@ export function apply(ctx, rawConfig) {
   const infoPayload = () => ({
     ok: true,
     configured: !!config.relayUrl,
+    enabled: !!config.enabled,
     connected: wsOpen,
     terminal: terminalOnline,
     relayUrl: config.relayUrl || '',
@@ -238,7 +248,23 @@ export function apply(ctx, rawConfig) {
     if (ws) { const w = ws; ws = null; wsOpen = false; try { w.close(1000, 'bye'); } catch { /* ignore */ } }
   }
 
+  /** 总开关：开 → 连接中继（已配地址时）；关 → 立即断开、中止资产推送与桥接 */
+  function setEnabled(on) {
+    const want = !!on;
+    if (config.enabled === want) return;
+    config.enabled = want;
+    saveFileCfg();
+    if (want) {
+      lastError = '';
+      connect();
+    } else {
+      disconnect();
+    }
+    log('remote relay ' + (want ? 'enabled' : 'stopped') + ' (总开关)');
+  }
+
   function connect() {
+    if (!config.enabled) return;   // 总开关关闭：绝不主动建连
     if (ws || !config.relayUrl) return;
     wantConnect = true;
     let client;
@@ -291,7 +317,7 @@ export function apply(ctx, rawConfig) {
     if (msg.type === 'ready') {
       log('relay ready, peer:', msg.peer);
       if (msg.peer === 1) setTerminalOnline(true);
-      void fullBridge.syncFullAssets();   // 完整模式：比对指纹，变了才推送（协议 §3.5）
+      if (config.enabled) void fullBridge.syncFullAssets();   // 完整模式：比对指纹，变了才推送（协议 §3.5）
       return;
     }
     if (msg.type === 'pair') {
@@ -617,10 +643,16 @@ export function apply(ctx, rawConfig) {
             if (overflow) return;
             let patch;
             try { patch = JSON.parse(body || '{}'); } catch { json(res, 400, { ok: false, error: 'bad json' }); return; }
+            // 总开关：立即生效（关 = 断开并停止一切上传，不等下一次启动）
+            if (typeof patch.enabled === 'boolean' || typeof patch.autoConnect === 'boolean') {
+              setEnabled(typeof patch.enabled === 'boolean' ? patch.enabled : patch.autoConnect);
+              json(res, 200, { ok: true, reconnectNeeded: false, ...infoPayload() });
+              return;
+            }
             const reconnectNeeded = applyConfigPatch(patch);
             saveFileCfg();
             json(res, 200, { ok: true, reconnectNeeded, ...infoPayload() });
-            if (reconnectNeeded) { disconnect(); if (config.autoConnect && config.relayUrl) setTimeout(connect, 300); }
+            if (reconnectNeeded) { disconnect(); if (config.enabled && config.relayUrl) setTimeout(connect, 300); }
           });
         },
       });
@@ -635,7 +667,8 @@ export function apply(ctx, rawConfig) {
       });
     } catch { /* 桌面形态无 tapIndex，走 index-inject */ }
 
-    if (config.autoConnect && config.relayUrl) setTimeout(connect, 200);
+    // 启动时按上次保存的总开关状态决定是否连接（关着就什么都不做，零上行）
+    if (config.enabled && config.relayUrl) setTimeout(connect, 200);
   });
 
   ctx.effect(() => () => {
@@ -653,6 +686,7 @@ export function apply(ctx, rawConfig) {
       if (v !== config.relayUrl) { config.relayUrl = v; need = true; }
     }
     if (typeof patch.deviceName === 'string') { config.deviceName = truncate(patch.deviceName.trim(), 64) || '我的 dsh'; }
+    // 仅保留旧字段（旧面板/旧配置写回时不被丢弃）；连接行为一律由 enabled 决定
     if (typeof patch.autoConnect === 'boolean') config.autoConnect = patch.autoConnect;
     if (typeof patch.approveFromPhone === 'boolean') config.approveFromPhone = patch.approveFromPhone;
     let fullModeChanged = false;
@@ -669,7 +703,7 @@ export function apply(ctx, rawConfig) {
       need = true;
       log('pairing reset: new sid generated');
     }
-    if (fullModeChanged && wsOpen) void fullBridge.syncFullAssets();   // 模式变化 → 立即按新指纹重推
+    if (fullModeChanged && wsOpen && config.enabled) void fullBridge.syncFullAssets();   // 模式变化 → 立即按新指纹重推
     return need;
   }
 

@@ -69,13 +69,18 @@ const ctx = {
 
 // 面板/配置路由挂到真实 HTTP 服务器上，顺带承载 /api/session.cancel
 // 以及"官方 UI"风格端点（完整模式 E2E 用）：served index 带 __DSH_BOOT__ 注入
-const fakeIndex = [
+// fakeIndexRev / assetBody 可在用例中改动，模拟"dsh 每次启动 rev 都变"与"资产内容真变"。
+let fakeIndexRev = 'e2e1';
+let assetBody = 'console.log("e2e asset")';
+const buildFakeIndex = () => [
   '<!doctype html><html><head>',
   '<meta name="viewport" content="width=device-width, initial-scale=1" />',
   '<title>DSH E2E Build</title>',
   '<link href="/manifest.webmanifest" rel="manifest">',
   '<script>globalThis["__DSH_BOOT__"] = {"e2e":true}</script>',
   '<script src="./assets/app-1.js"></script>',
+  // dsh 真实 index 里的插件 combo 行：rev 由 bundle 文件 mtime 派生，每次启动都会变
+  '<link rel="preload" as="script" href="/plugins/??fake/client.js&rev=' + fakeIndexRev + '">',
   '</head><body><div id="root"></div></body></html>',
 ].join('');
 const apiEchoBodies = [];
@@ -87,9 +92,9 @@ const httpServer = http.createServer((req, res) => {
     req.on('end', () => { apiBodies.push(body); res.writeHead(200, { 'content-type': 'application/json' }).end('{"result":{"accepted":true}}'); });
     return;
   }
-  if (pathname === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(fakeIndex); return; }
+  if (pathname === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }).end(buildFakeIndex()); return; }
   if (pathname === '/manifest.webmanifest') { res.writeHead(200, { 'content-type': 'application/manifest+json' }).end('{"name":"dsh-e2e"}'); return; }
-  if (pathname === '/assets/app-1.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("e2e asset")'); return; }
+  if (pathname === '/assets/app-1.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end(assetBody); return; }
   // 懒加载 chunk：官方 UI 运行时才请求（如终端面板），不在 index 引用里
   if (pathname === '/plugins/@deepseek-ai/dsh-client-ui-sidebar-terminal/client.terminal.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("e2e terminal chunk")'); return; }
   if (pathname === '/api/echo') {
@@ -396,6 +401,51 @@ for (let attempt = 0; attempt < 5 && !ready2; attempt++) {
 }
 assert.ok(ready2, '重置后新终端 5 次内未配对成功');
 
+STEP(13, '总开关：停止即断开且不自动重连，启用后重新连上…');
+const offRes = await postConfig({ enabled: false });
+assert.equal(offRes.ok, true);
+assert.equal(offRes.enabled, false, '停止后 info.enabled 应为 false');
+assert.equal(offRes.connected, false, '停止后应立即断开');
+await sleep(1800);   // 跨越退避重连窗口（1s 起）：关掉后绝不能自己连回来
+const stillOff = await infoReq();
+assert.equal(stillOff.enabled, false);
+assert.equal(stillOff.connected, false, '停止后仍在自动重连');
+const savedOff = JSON.parse(fs.readFileSync(path.join(toolsDir, 'remote-relay.json'), 'utf8'));
+assert.equal(savedOff.enabled, false, '总开关状态未落盘（重启后无法沿用）');
+const onRes = await postConfig({ enabled: true });
+assert.equal(onRes.enabled, true);
+for (let i = 0; i < 100; i++) { if ((await infoReq()).connected) break; await sleep(100); }
+assert.equal((await infoReq()).connected, true, '启用后 10s 内未重新连上中继');
+const savedOn = JSON.parse(fs.readFileSync(path.join(toolsDir, 'remote-relay.json'), 'utf8'));
+assert.equal(savedOn.enabled, true, '启用状态未落盘');
+
+STEP(14, '指纹：index 的 ?rev= 变化不重推，资产内容真变才重推…');
+const metaOf = (sid) => path.join(tmp, 'data', 'assets', sid, 'full.json');
+const metaVersion = () => JSON.parse(fs.readFileSync(metaOf(info2.sid), 'utf8')).version;
+const waitConnected = async () => {
+  for (let i = 0; i < 100; i++) { if ((await infoReq()).connected) return; await sleep(100); }
+  throw new Error('重连超时');
+};
+const v0 = metaVersion();
+const m0 = fs.statSync(metaOf(info2.sid)).mtimeMs;
+fakeIndexRev = 'e2e2';   // 模拟 dsh 重启：只有 rev（mtime 派生）变了，内容一点没变
+await postConfig({ enabled: false });
+await postConfig({ enabled: true });
+await waitConnected();
+await sleep(1000);
+assert.equal(metaVersion(), v0, '仅 rev 变化却触发了整包重推');
+assert.equal(fs.statSync(metaOf(info2.sid)).mtimeMs, m0, '仅 rev 变化却重写了中继资产');
+
+assetBody = 'console.log("e2e asset v2")';   // 内容真变：必须重推
+await postConfig({ enabled: false });
+await postConfig({ enabled: true });
+await waitConnected();
+let v2 = v0;
+for (let i = 0; i < 100 && v2 === v0; i++) { await sleep(100); v2 = metaVersion(); }
+assert.notEqual(v2, v0, '资产内容变化未触发重推');
+const appFile = path.join(tmp, 'data', 'assets', info2.sid, 'full', 'assets', 'app-1.js');
+assert.equal(fs.readFileSync(appFile, 'utf8'), 'console.log("e2e asset v2")', '重推后中继上的资产未更新');
+
 // ── 收尾 ─────────────────────────────────────────────────────────────────────
 for (const c of cleanups) { try { await c(); } catch { /* ignore */ } }
 term.close(1000);
@@ -403,7 +453,7 @@ await relay.close();
 httpServer.close();
 await new Promise((r) => httpServer.closeAllConnections?.() ?? r());
 fs.rmSync(tmp, { recursive: true, force: true });
-console.log('\n全部通过 ✓  （15 组用例：连接/配对/列表/快照/实时/发送/取消/批准/附件/完整模式资产/HTTP桥/WS桥/注入/重置）');
+console.log('\n全部通过 ✓  （17 组用例：连接/配对/列表/快照/实时/发送/取消/批准/附件/完整模式资产/HTTP桥/WS桥/注入/重置/总开关/指纹稳定）');
 process.exit(0);
 
 async function postConfig(patch) {

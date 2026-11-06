@@ -213,19 +213,30 @@ export function createFullBridge(io) {
     httpBridges.clear();
     for (const b of wsBridges.values()) { if (b.local) try { b.local.close(1000, 'device-reconnect'); } catch { /* ignore */ } }
     wsBridges.clear();
-    resetSync();
+    syncEpoch += 1;                       // 作废正在进行的资产推送（停止/断开后绝不再上传）
+    resetSync(new Error('sync aborted'));
   }
 
   // ── 资产同步 ──
   let syncing = false;
-  let syncWaiter = null;   // { want: Set<type>, resolve, timer }
+  let syncEpoch = 0;       // 每次中止 +1：旧一轮同步的任何后续帧都会被丢弃
+  let syncWaiter = null;   // { want: Set<type>, resolve, reject, timer }
 
-  function resetSync() { if (syncWaiter) { clearTimeout(syncWaiter.timer); syncWaiter = null; } syncing = false; }
+  /** 中止当前同步：挂起的等待立即 reject，调用方（syncFullAssets）随之退出 */
+  function resetSync(err) {
+    const w = syncWaiter;
+    if (w) {
+      syncWaiter = null;
+      clearTimeout(w.timer);
+      w.reject(err || new Error('sync aborted'));
+    }
+    syncing = false;
+  }
 
   function waitReply(want, timeoutMs) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { syncWaiter = null; reject(new Error('relay reply timeout: ' + want)); }, timeoutMs);
-      syncWaiter = { want: new Set(Array.isArray(want) ? want : [want]), resolve, timer };
+      syncWaiter = { want: new Set(Array.isArray(want) ? want : [want]), resolve, reject, timer };
     });
   }
 
@@ -303,13 +314,72 @@ export function createFullBridge(io) {
     return /^[A-Za-z0-9._/-]+$/.test(rel) ? rel : 'enc-' + crypto.createHash('sha256').update(key).digest('hex').slice(0, 12);
   };
 
+  /** 本地读取 index 引用的全部资产（只走 127.0.0.1，不产生任何上行） */
+  async function collectAssets(indexHtml, indexBufFinal, cookie, epoch) {
+    const origin = `http://127.0.0.1:${getPort()}`;
+    const paths = collectPaths(indexHtml, new URL(origin + '/'), new Set(['/']));
+    collectBootUrls(indexHtml, new URL(origin + '/'), paths);
+    // CSS 内引用再扩散一层
+    for (const p2 of [...paths]) {
+      if (!p2.endsWith('.css')) continue;
+      try {
+        const css = await httpGet(p2, cookie);
+        collectCssUrls(css.toString('utf8'), p2, origin, paths);
+      } catch { /* css 丢失不致命 */ }
+    }
+    const list = [...paths].filter((p2) => p2 !== '/');
+    if (list.length > MAX_FILES) throw new Error('too many assets: ' + list.length);
+    const files = [{ path: 'index.html', buf: indexBufFinal }];
+    let total = indexBufFinal.length;
+    let skipped = 0;
+    for (const p2 of list) {
+      if (epoch !== syncEpoch) throw new Error('sync aborted');
+      let buf;
+      try {
+        buf = await httpGet(p2, cookie);
+      } catch (e) {
+        // 其他插件注入的行（/plugins/* 等）本地可能 404：跳过即可，这些路径在手机侧同样不可达
+        skipped++;
+        if (skipped <= 5) log('full-mode asset skip:', p2, '—', String(e.message || e).slice(0, 80));
+        continue;
+      }
+      files.push({ path: diskKey(p2), buf });
+      total += buf.length;
+      if (total > MAX_TOTAL) throw new Error('assets total too large');
+    }
+    if (skipped > 5) log(`full-mode asset skip ×${skipped} (其余略)`);
+    return { files, total, skipped };
+  }
+
+  /**
+   * 版本指纹：只对"实际要落盘的字节"取哈希。
+   * 不能拿 index 原文当版本号——dsh 的 index 里带 `?rev=<12位哈希>`，而 rev 由
+   * bundle 文件的 mtime/ctime/size 派生（dsh: artifactRevision），每次启动/重装都会变，
+   * 直接哈希原文会导致每次启动都判定"界面变了"并整包重推 ~25MB。
+   * 这里把 rev 参数归一化，再叠加每个文件的 sha8：内容真变了才换版本。
+   */
+  const revless = (s) => String(s).replace(/([?&])rev=[^&#]*/g, '$1rev=*');
+  function assetFingerprint(files) {
+    const parts = files.map((f) => (f.path === 'index.html'
+      ? 'index.html\u0000' + sha8(revless(stripBoot(f.buf.toString('utf8'))))
+      : revless(f.path) + '\u0000' + sha8(f.buf)));
+    parts.sort();
+    return sha8(parts.join('\n'));
+  }
+
   async function syncFullAssets() {
     if (!fullUiEnabled()) { log('full-mode sync skipped (disabled)'); return; }
     if (syncing) return;
     syncing = true;
+    const epoch = syncEpoch;
     const t0 = Date.now();
+    /** 每帧发送前校验纪元：停止/断开后旧一轮同步立即失效，残留分片不会再推上去 */
+    const send = (frame) => {
+      if (epoch !== syncEpoch) throw new Error('sync aborted');
+      sendData(frame);
+    };
     try {
-      sendData({ type: 'full-info' });
+      send({ type: 'full-info' });
       const st = await waitReply('full-info-state', 15000);
       const cookie = await refreshSessionCookie();
       const indexBuf = await httpGet('/', cookie);
@@ -320,61 +390,34 @@ export function createFullBridge(io) {
         ? indexRaw.replace('</head>', KIOSK_SHIM + '</head>')
         : indexRaw;
       const indexBufFinal = Buffer.from(indexHtml, 'utf8');
-      const version = 'idx2-' + sha8(stripBoot(indexHtml)) + (minimal ? '-k' : '');
+      // 先本地按内容算指纹（读本机、不上传），只有内容真的变了才推
+      const { files, total, skipped } = await collectAssets(indexHtml, indexBufFinal, cookie, epoch);
+      const version = 'idx3-' + assetFingerprint(files) + (minimal ? '-k' : '');
       if (st.version === version) {
         log(`full-mode assets up-to-date (v=${version}, ${st.files} files)`);
         return;
       }
-      const base = { origin: `http://127.0.0.1:${getPort()}` };
-      const origin = base.origin;
-      const paths = collectPaths(indexHtml, new URL(origin + '/'), new Set(['/']));
-      collectBootUrls(indexHtml, new URL(origin + '/'), paths);
-      // CSS 内引用再扩散一层
-      for (const p2 of [...paths]) {
-        if (!p2.endsWith('.css')) continue;
-        try {
-          const css = await httpGet(p2, cookie);
-          collectCssUrls(css.toString('utf8'), p2, origin, paths);
-        } catch { /* css 丢失不致命 */ }
-      }
-      const list = [...paths].filter((p2) => p2 !== '/');
-      if (list.length > MAX_FILES) throw new Error('too many assets: ' + list.length);
-      const files = [{ path: 'index.html', buf: indexBufFinal }];
-      let total = indexBufFinal.length;
-      let skipped = 0;
-      for (const p2 of list) {
-        let buf;
-        try {
-          buf = await httpGet(p2, cookie);
-        } catch (e) {
-          // 其他插件注入的行（/plugins/* 等）本地可能 404：跳过即可，这些路径在手机侧同样不可达
-          skipped++;
-          if (skipped <= 5) log('full-mode asset skip:', p2, '—', String(e.message || e).slice(0, 80));
-          continue;
-        }
-        files.push({ path: diskKey(p2), buf });
-        total += buf.length;
-        if (total > MAX_TOTAL) throw new Error('assets total too large');
-      }
-      if (skipped > 5) log(`full-mode asset skip ×${skipped} (其余略)`);
       log(`full-mode push: ${files.length} files${skipped ? ` (跳过 ${skipped})` : ''}, ${(total / 1048576).toFixed(1)}MB → relay`);
       const pushId = 'p-' + Date.now().toString(36);
-      sendData({ type: 'asset-begin', pushId, version, files: files.map((f) => ({ path: f.path, size: f.buf.length, sha8: sha8(f.buf) })) });
+      send({ type: 'asset-begin', pushId, version, files: files.map((f) => ({ path: f.path, size: f.buf.length, sha8: sha8(f.buf) })) });
       await waitReply('asset-ok', 20000);
       for (const f of files) {
         const totalChunks = Math.max(1, Math.ceil(f.buf.length / CHUNK));
         for (let seq = 0; seq < totalChunks; seq++) {
-          sendData({ type: 'asset-put', pushId, path: f.path, seq, total: totalChunks, data: f.buf.subarray(seq * CHUNK, (seq + 1) * CHUNK).toString('base64') });
+          send({ type: 'asset-put', pushId, path: f.path, seq, total: totalChunks, data: f.buf.subarray(seq * CHUNK, (seq + 1) * CHUNK).toString('base64') });
         }
-        sendData({ type: 'asset-end', pushId, path: f.path });
+        send({ type: 'asset-end', pushId, path: f.path });
       }
-      sendData({ type: 'asset-commit', pushId, version });
+      send({ type: 'asset-commit', pushId, version });
       const done = await waitReply(['asset-committed'], 120000);
       log(`full-mode assets committed: v=${done.version} files=${done.files} bytes=${done.bytes} (${((Date.now() - t0) / 1000).toFixed(1)}s)`);
     } catch (e) {
-      log('full-mode sync failed:', e.message);
+      const msg = String((e && e.message) || e);
+      if (msg === 'sync aborted') log('full-mode sync aborted (总开关关闭/连接断开)');
+      else log('full-mode sync failed:', msg);
     } finally {
-      resetSync();
+      // 已被 abort（停止/断开）时新一轮同步可能已经开始，不能动它的 syncing 状态
+      if (epoch === syncEpoch) resetSync();
     }
   }
 
