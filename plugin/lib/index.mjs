@@ -193,6 +193,20 @@ export function apply(ctx, rawConfig) {
   };
 
   // ── 完整模式桥（资产推送 + HTTP/WS 桥接）────────────────────────────────
+  // 诊断：资产清单与 index 快照落盘。版本号一变就能比对出到底哪个文件/哪段内容变了，
+  // 不必靠猜（曾经因为 combo 落盘名带 rev，每次启动都整包重推）。
+  const manifestPath = path.join(toolsDir, 'remote-relay.manifest.json');
+  const indexDumpPath = path.join(toolsDir, 'remote-relay.index.html');
+  const assetManifest = {
+    load() {
+      try {
+        const j = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        return j && typeof j.version === 'string' && Array.isArray(j.files) ? j : null;
+      } catch { return null; }
+    },
+    save(m) { try { fs.writeFileSync(manifestPath, JSON.stringify(m)); } catch { /* ignore */ } },
+    dumpIndex(html) { try { fs.writeFileSync(indexDumpPath, html); } catch { /* ignore */ } },
+  };
   const fullBridge = createFullBridge({
     log,
     sendData,
@@ -202,6 +216,7 @@ export function apply(ctx, rawConfig) {
     // 轻量 UI 已移除，官方 UI 是手机端唯一界面：资产推送恒开（随总开关启停）
     fullUiEnabled: () => !!config.enabled,
     fullUiMinimal: () => !!config.fullUiMinimal,
+    assetManifest,
   });
 
   // ── 连接管理 ────────────────────────────────────────────────────────────
@@ -624,11 +639,14 @@ export function apply(ctx, rawConfig) {
       res.end(body);
     };
     try {
-      webServer.register({
+      // 注册的 disposer 必须挂到 hostCtx.effect 上：否则插件热重载/卸载时路由留在
+      // webServer 里，下次注册直接撞 "duplicate exact route"（旧实例的处理函数还会
+      // 绑着已销毁的闭包，面板从此读写到死实例）。
+      hostCtx.effect(() => webServer.register({
         kind: 'exact', path: '/remote-relay/info',
         handler: (req, res) => json(res, 200, infoPayload()),
-      });
-      webServer.register({
+      }), 'remote-relay: /remote-relay/info');
+      hostCtx.effect(() => webServer.register({
         kind: 'exact', path: '/remote-relay/config',
         handler: (req, res) => {
           if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
@@ -655,16 +673,16 @@ export function apply(ctx, rawConfig) {
             if (reconnectNeeded) { disconnect(); if (config.enabled && config.relayUrl) setTimeout(connect, 300); }
           });
         },
-      });
+      }), 'remote-relay: /remote-relay/config');
       log('panel routes registered (/remote-relay/info|config)');
     } catch (e) { log('register routes failed:', e.message); }
 
     try {
-      webServer.tapIndex((html) => {
+      hostCtx.effect(() => webServer.tapIndex((html) => {
         if (typeof html !== 'string' || html.indexOf('__rrBooted') !== -1) return html;
         const tag = '<' + 'script>' + INJECT_SCRIPT + '<' + '/script>';
         return html.replace(/<\/body>/i, tag + '</body>');
-      });
+      }), 'remote-relay: tapIndex');
     } catch { /* 桌面形态无 tapIndex，走 index-inject */ }
 
     // 启动时按上次保存的总开关状态决定是否连接（关着就什么都不做，零上行）

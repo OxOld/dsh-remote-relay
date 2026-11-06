@@ -74,11 +74,19 @@ function rrmDrawQr(canvas, url) {
 }
 
 function rrmPaint() {
-  if (!rrmPanel || !rrmInfo) return;
+  if (!rrmInfo) return;
   var info = rrmInfo;
   var on = !!info.enabled;
+  // 状态灯与面板解耦：不点开面板也必须反映真实连接状态
+  //（之前整个 rrmPaint 被 !rrmPanel 挡在门外，重启后要"点一下"才正常）
   var dot = document.getElementById('rrm-fab-dot');
   if (dot) dot.className = (on && info.connected) ? 'on' : '';
+  if (rrmFab) {
+    rrmFab.title = !on ? '远程控制已停止'
+      : info.connected ? (info.terminal ? '手机已连接' : '已连接中继，等待手机扫码')
+        : (info.configured ? '未连接中继' : '未配置中继');
+  }
+  if (!rrmPanel) return;
   var swBtn = rrmPanel.querySelector('#rrm-sw-btn');
   var swText = rrmPanel.querySelector('#rrm-sw-text');
   var swDot = rrmPanel.querySelector('#rrm-sw-dot');
@@ -332,8 +340,12 @@ function rrmBoot() {
   rrmFab.appendChild(rrmEl('span', null, '远程'));
   rrmFab.onclick = function () { rrmToggle(); };
   document.body.appendChild(rrmFab);
-  setInterval(rrmRefresh, 10000);
   rrmRefresh();
+  // 页面常先于宿主路由就绪加载：前几秒补几次，让状态灯尽快反映真实状态，
+  // 而不是等 10s 轮询、更不该等用户点开面板
+  var warmup = [500, 1200, 2500, 5000];
+  for (var i = 0; i < warmup.length; i++) setTimeout(rrmRefresh, warmup[i]);
+  setInterval(rrmRefresh, 10000);
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', rrmBoot);

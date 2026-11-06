@@ -32,7 +32,7 @@ const stripBoot = (html) => String(html)
  *   invalidateCookie(): void, fullUiEnabled(): bool, fullUiMinimal(): bool
  */
 export function createFullBridge(io) {
-  const { log, sendData, getPort, refreshSessionCookie, invalidateCookie, fullUiEnabled, fullUiMinimal } = io;
+  const { log, sendData, getPort, refreshSessionCookie, invalidateCookie, fullUiEnabled, fullUiMinimal, assetManifest } = io;
 
   // ── HTTP 桥 ──
   /** reqId → { req?: http.ClientRequest, inflight, paused } */
@@ -314,6 +314,14 @@ export function createFullBridge(io) {
     return /^[A-Za-z0-9._/-]+$/.test(rel) ? rel : 'enc-' + crypto.createHash('sha256').update(key).digest('hex').slice(0, 12);
   };
 
+  /**
+   * rev 归一化：dsh 的 index 与 combo URL 里的 `?rev=` 来自 artifactRevision()
+   * （bundle 文件 mtime/ctime/size 的哈希），每次启动/重装都会变，不能作为身份。
+   * 注意 HTML 属性里的写法是 `&amp;rev=`（`&` 被实体转义），必须一并匹配，
+   * 否则 index 原文里那批 rev 会漏归一化，导致每次启动指纹都变。
+   */
+  const revless = (s) => String(s).replace(/(&amp;|[?&])rev=[^&#"'\s]*/g, '$1rev=*');
+
   /** 本地读取 index 引用的全部资产（只走 127.0.0.1，不产生任何上行） */
   async function collectAssets(indexHtml, indexBufFinal, cookie, epoch) {
     const origin = `http://127.0.0.1:${getPort()}`;
@@ -329,7 +337,9 @@ export function createFullBridge(io) {
     }
     const list = [...paths].filter((p2) => p2 !== '/');
     if (list.length > MAX_FILES) throw new Error('too many assets: ' + list.length);
-    const files = [{ path: 'index.html', buf: indexBufFinal }];
+    // key = rev 归一化后的逻辑路径（指纹用）；path = 真正落盘名（推送用）。
+    // combo URL 含 ?&@，落盘名是 sha256(整串) → 带 rev，不能拿它当身份。
+    const files = [{ path: 'index.html', key: 'index.html', buf: indexBufFinal }];
     let total = indexBufFinal.length;
     let skipped = 0;
     for (const p2 of list) {
@@ -343,7 +353,7 @@ export function createFullBridge(io) {
         if (skipped <= 5) log('full-mode asset skip:', p2, '—', String(e.message || e).slice(0, 80));
         continue;
       }
-      files.push({ path: diskKey(p2), buf });
+      files.push({ path: diskKey(p2), key: revless(p2), buf });
       total += buf.length;
       if (total > MAX_TOTAL) throw new Error('assets total too large');
     }
@@ -351,20 +361,42 @@ export function createFullBridge(io) {
     return { files, total, skipped };
   }
 
+  /** 文本类资产（含 combo 组合脚本：它们的末尾带 `//# sourceMappingURL=…&rev=…`） */
+  const isTextAsset = (f) => f.key === 'index.html'
+    || f.key.includes('??')
+    || /\.(?:js|mjs|css|html|json|webmanifest|map|txt)$/i.test(f.key);
+
+  /** 指纹用的单文件哈希：文本先做 rev 归一化，二进制直接哈希 */
+  function fingerprintHash(f) {
+    if (f.key === 'index.html') return sha8(revless(stripBoot(f.buf.toString('utf8'))));
+    if (isTextAsset(f)) return sha8(revless(f.buf.toString('utf8')));
+    return sha8(f.buf);
+  }
+
   /**
-   * 版本指纹：只对"实际要落盘的字节"取哈希。
-   * 不能拿 index 原文当版本号——dsh 的 index 里带 `?rev=<12位哈希>`，而 rev 由
-   * bundle 文件的 mtime/ctime/size 派生（dsh: artifactRevision），每次启动/重装都会变，
-   * 直接哈希原文会导致每次启动都判定"界面变了"并整包重推 ~25MB。
-   * 这里把 rev 参数归一化，再叠加每个文件的 sha8：内容真变了才换版本。
+   * 版本指纹：只对"实际要落盘的字节"取哈希，身份用 rev 归一化后的逻辑路径。
+   * 不能拿 index 原文当版本号，也不能拿含 rev 的落盘名当身份，更不能用未归一化的
+   * 文件内容——dsh 会给 combo 脚本追加带 rev 的 sourceMappingURL，rev 每次启动都变。
    */
-  const revless = (s) => String(s).replace(/([?&])rev=[^&#]*/g, '$1rev=*');
   function assetFingerprint(files) {
-    const parts = files.map((f) => (f.path === 'index.html'
-      ? 'index.html\u0000' + sha8(revless(stripBoot(f.buf.toString('utf8'))))
-      : revless(f.path) + '\u0000' + sha8(f.buf)));
+    const parts = files.map((f) => `${f.key}\u0000${fingerprintHash(f)}`);
     parts.sort();
     return sha8(parts.join('\n'));
+  }
+
+  /** 版本变化时输出清单差异：+新增 -移除 ~内容变化（各列前 5 个 key） */
+  function describeManifestDiff(prev, next) {
+    const before = new Map((prev.files || []).map(([k, h]) => [k, h]));
+    const after = new Map((next.files || []).map(([k, h]) => [k, h]));
+    const added = [...after.keys()].filter((k) => !before.has(k));
+    const removed = [...before.keys()].filter((k) => !after.has(k));
+    const changed = [...after.keys()].filter((k) => before.has(k) && before.get(k) !== after.get(k));
+    const brief = (keys) => keys.slice(0, 5).map((k) => (k.length > 64 ? `${k.slice(0, 61)}…` : k)).join(' | ')
+      + (keys.length > 5 ? ` …(+${keys.length - 5})` : '');
+    return `fingerprint changed ${prev.version} → ${next.version} (+${added.length} -${removed.length} ~${changed.length})`
+      + (added.length ? `\n  added: ${brief(added)}` : '')
+      + (removed.length ? `\n  removed: ${brief(removed)}` : '')
+      + (changed.length ? `\n  changed: ${brief(changed)}` : '');
   }
 
   async function syncFullAssets() {
@@ -392,12 +424,21 @@ export function createFullBridge(io) {
       const indexBufFinal = Buffer.from(indexHtml, 'utf8');
       // 先本地按内容算指纹（读本机、不上传），只有内容真的变了才推
       const { files, total, skipped } = await collectAssets(indexHtml, indexBufFinal, cookie, epoch);
-      const version = 'idx3-' + assetFingerprint(files) + (minimal ? '-k' : '');
+      const version = 'idx4-' + assetFingerprint(files) + (minimal ? '-k' : '');
+      // 记录本轮清单（key → sha8）并留一份 index 快照：版本变了就能指出"谁变了"
+      const manifest = { version, at: new Date().toISOString(), files: files.map((f) => [f.key, fingerprintHash(f), f.buf.length]) };
+      try {
+        const prev = assetManifest?.load?.() ?? null;
+        if (prev && prev.version !== version) log(describeManifestDiff(prev, manifest));
+        assetManifest?.save?.(manifest);
+        assetManifest?.dumpIndex?.(indexHtml);
+      } catch { /* 诊断失败不影响同步 */ }
       if (st.version === version) {
         log(`full-mode assets up-to-date (v=${version}, ${st.files} files)`);
         return;
       }
-      log(`full-mode push: ${files.length} files${skipped ? ` (跳过 ${skipped})` : ''}, ${(total / 1048576).toFixed(1)}MB → relay`);
+      log(`full-mode push: ${files.length} files${skipped ? ` (跳过 ${skipped})` : ''}, ${(total / 1048576).toFixed(1)}MB → relay`
+        + ` (local ${version} / relay ${st.version || '无'})`);
       const pushId = 'p-' + Date.now().toString(36);
       send({ type: 'asset-begin', pushId, version, files: files.map((f) => ({ path: f.path, size: f.buf.length, sha8: sha8(f.buf) })) });
       await waitReply('asset-ok', 20000);

@@ -72,6 +72,7 @@ const ctx = {
 // fakeIndexRev / assetBody 可在用例中改动，模拟"dsh 每次启动 rev 都变"与"资产内容真变"。
 let fakeIndexRev = 'e2e1';
 let assetBody = 'console.log("e2e asset")';
+let comboBody = 'console.log("e2e combo")';
 const buildFakeIndex = () => [
   '<!doctype html><html><head>',
   '<meta name="viewport" content="width=device-width, initial-scale=1" />',
@@ -79,8 +80,9 @@ const buildFakeIndex = () => [
   '<link href="/manifest.webmanifest" rel="manifest">',
   '<script>globalThis["__DSH_BOOT__"] = {"e2e":true}</script>',
   '<script src="./assets/app-1.js"></script>',
-  // dsh 真实 index 里的插件 combo 行：rev 由 bundle 文件 mtime 派生，每次启动都会变
-  '<link rel="preload" as="script" href="/plugins/??fake/client.js&rev=' + fakeIndexRev + '">',
+  // dsh 真实 index 里的插件 combo 行：rev 由 bundle 文件 mtime 派生，每次启动都会变。
+  // 注意 HTML 属性里 & 会被转义成 &amp;，必须按真实写法覆盖（曾因此漏归一化）
+  '<link rel="preload" as="script" href="/plugins/??fake/client.js&amp;rev=' + fakeIndexRev + '">',
   '</head><body><div id="root"></div></body></html>',
 ].join('');
 const apiEchoBodies = [];
@@ -97,6 +99,14 @@ const httpServer = http.createServer((req, res) => {
   if (pathname === '/assets/app-1.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end(assetBody); return; }
   // 懒加载 chunk：官方 UI 运行时才请求（如终端面板），不在 index 引用里
   if (pathname === '/plugins/@deepseek-ai/dsh-client-ui-sidebar-terminal/client.terminal.js') { res.writeHead(200, { 'content-type': 'text/javascript' }).end('console.log("e2e terminal chunk")'); return; }
+  // combo 资产（/plugins/??id/client.js&rev=…）：落盘名由含 rev 的整串哈希得来，
+  // 且 dsh 会在体尾追加带 rev 的 sourceMappingURL —— 两者都要能被指纹忽略。
+  // 专门用来验证"rev 变了但内容没变不算变更"。
+  if (pathname === '/plugins/') {
+    res.writeHead(200, { 'content-type': 'text/javascript' })
+      .end(comboBody + '//# sourceMappingURL=plugins/??fake/client.js&rev=' + fakeIndexRev + '\n');
+    return;
+  }
   if (pathname === '/api/echo') {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -148,9 +158,17 @@ const httpPort = httpServer.address().port;
 const hostCtx = {
   webServer: {
     port: httpPort,
-    register: (route) => registeredRoutes.push(route),
-    tapIndex: (fn) => taps.push(fn),
+    register: (route) => {
+      registeredRoutes.push(route);
+      return () => { const i = registeredRoutes.indexOf(route); if (i >= 0) registeredRoutes.splice(i, 1); };
+    },
+    tapIndex: (fn) => {
+      taps.push(fn);
+      return () => { const i = taps.indexOf(fn); if (i >= 0) taps.splice(i, 1); };
+    },
   },
+  // 与 cordis 一致：effect(cb) 立即执行 cb 并把返回的 disposer 收进清理栈
+  effect: (fn) => { cleanups.push(fn()); },
 };
 
 // ── 启动插件 ─────────────────────────────────────────────────────────────────
