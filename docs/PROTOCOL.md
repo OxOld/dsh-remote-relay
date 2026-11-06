@@ -165,7 +165,13 @@ Msg  = { seq: number,                    // 会话事件序号（幂等/去重�
 | d→r | `{type:'asset-end', pushId, path}` | 校验 size+sha8 后落盘该文件 |
 | d→r | `{type:'asset-commit', pushId, version}` | 暂存目录原子换正，relay 回 `asset-committed` |
 | d→r | `{type:'asset-abort', pushId}` | 丢弃暂存 |
-| r→d | `{type:'asset-ok', pushId}` / `{type:'asset-committed', pushId, version, files, bytes}` | 应答 |
+| r→d | `{type:'asset-ok', pushId, reused?}` / `{type:'asset-committed', pushId, version, files, bytes}` | 应答；`reused` 是 relay 按内容从上一批复用的 path 列表 |
+
+**复用（A1）**：`asset-begin` 时 relay 用上一批留下的 `full-files.json`（path→sha8）比对
+`sha8 + size`，命中的文件直接从旧 `full/` 复制到暂存目录，并在 `asset-ok.reused` 里列出；
+device 对这些 path 可跳过 `asset-put`/`asset-end`（不发也能 commit，relay 已按完成计）。
+这让「rev 变化导致 index + combo 必须重推」时不必重传没变的 `assets/`（~24MB → ~11MB），
+也兼容旧 device（照常整包重发时 relay 忽略重复分片）。
 
 校验：`path` 必须 `^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$` 且不含 `..` 段；单文件 ≤ 20MB，
 单次推送总量 ≤ 128MB、文件数 ≤ 800；`sha8` 为内容 SHA-256 前 8 个 hex。任何校验失败
@@ -201,9 +207,32 @@ device 侧仅接受 `path` 以 `api/` 开头的桥；并发桥 ≤ 16，超出�
 
 ### 3.5 版本指纹与重推
 
-`version = sha8(去 __DSH_BOOT__ 注入段后的 served index.html)`。插件在每次连接 ready 后
-比对 `full-info-state`，不一致才推送（家宽上行一次性 ~10MB 量级）；relay 重启不丢资产
-（落盘 `data/assets/full/`），dsh 升级后 index 指纹变化自动重推。
+```
+version = 'idx5-' + sha8(内容指纹) + '-' + sha8(index 原文) + ['-k' 精简模式]
+```
+
+- **内容指纹**：对文本资产做 `rev` 归一化（`revless`）后取各文件 sha8，再整体 sha8。
+  只有内容真变才变。
+- **index 原文**：包含所有 `?rev=` 与 `__DSH_BOOT__` 条目。dsh 重启/重装会改变 rev，
+  版本必须跟着变——否则 relay 停在旧 rev，而运行时 `/plugins/events` 的插件图与未命中
+  回源都带新 rev，同一插件出现两份，slot 装配崩溃（白板，见 TROUBLESHOOTING）。
+- 代价被复用抵消：rev 变化时只有 index + combo（含 rev 的 URL）真正上行，
+  没变的 `assets/` 由 relay 从上一批复制（`asset-ok.reused`）。
+
+插件在每次连接 ready 后比对 `full-info-state`，不一致才推送；relay 重启不丢资产
+（落盘 `data/assets/<sid>/full/`），dsh 升级后 index 指纹变化自动重推。
+
+### 3.6 根路径白名单回源（给用绝对路径的插件）
+
+有些插件把本机路由挂在自己的根路径上（如 `/workbuddy/status`、`/dsh-whale/widget.js`），
+官方 UI 在桌面端直接用绝对路径请求；在 relay 的 `/remote/full/` 子路径下这些请求会逃逸。
+
+- relay 启动参数 `rootProxy` / 环境变量 `RELAY_ROOT_PROXY`（逗号分隔前缀，如
+  `/workbuddy/,/dsh-whale/`）；
+- 命中前缀的 HTTP 请求（GET/HEAD/POST/DELETE…）必须带有效 `rrm_full`，device 在线时走
+  §3.3 同一条 HTTP 桥，`path` 为请求路径去掉前导 `/`；未命中白名单 → 404；
+- `/remote*`、`/healthz` 永不进入白名单；WS 升级不支持（插件 WS 仍应走 `api/` 前缀）。
+
 
 ---
 

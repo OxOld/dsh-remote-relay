@@ -55,11 +55,27 @@ export function rewriteIndex(html) {
  *  tlsReady      bool —— cookie 是否加 Secure
  *  log           日志函数
  */
-export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady, log }) {
+export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady, log, rootProxy = [] }) {
   const assetsDir = path.join(dataDir, 'assets');
   /** 资产按设备 sid 隔离：assets/<sid>/full —— 多设备/多用户互不覆盖（cookie 里自带 sid） */
   const liveDirOf = (sid) => path.join(assetsDir, sid, 'full');
   const metaFileOf = (sid) => path.join(assetsDir, sid, 'full.json');
+  /** 上一批资产的 path→sha8 索引：rev 变化重推时用它复用内容未变的文件（避免整包重传） */
+  const filesFileOf = (sid) => path.join(assetsDir, sid, 'full-files.json');
+
+  // ── 根路径白名单：给用绝对路径的插件（/workbuddy/*、/dsh-whale/*）回源到设备 ──
+  // 这些插件的 client 直接 fetch('/workbuddy/status')，而 relay 只托管 /remote/full/*；
+  // 不代理的话手机端只能拿到 404。白名单必须显式配置，且永远排除 relay 自己的命名空间。
+  const rootPrefixes = (Array.isArray(rootProxy) ? rootProxy : [])
+    .map((p) => String(p || '').trim())
+    .filter((p) => p.startsWith('/') && !p.startsWith('/remote') && !p.startsWith('/healthz'))
+    .map((p) => (p.endsWith('/') ? p : p + '/'));
+  const matchesRootProxy = (pathname) => {
+    for (const p of rootPrefixes) {
+      if (pathname === p.slice(0, -1) || pathname.startsWith(p)) return true;
+    }
+    return false;
+  };
 
   // ── 托管状态（每设备一份）──
   const liveMetas = new Map();   // sid → {version, files, bytes}
@@ -173,8 +189,44 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true });
     for (const p2 of files.keys()) fs.mkdirSync(path.join(dir, ...p2.split('/').slice(0, -1)), { recursive: true });   // 嵌套路径预建目录
-    pushes.set(id, { sid, dir, files, got: new Map(), total, version: String(p.version || '') });
-    send(conn, { type: 'asset-ok', pushId: id });
+    const push = { sid, dir, files, got: new Map(), total, version: String(p.version || '') };
+    pushes.set(id, push);
+    // rev 变化重推时，内容完全相同的文件（sha8 + size 一致）直接从上一批 liveDir 复用，
+    // 避免把 index/combo 之外没变的 assets/ 再传一遍（24MB → 约 11MB）。
+    const reused = reuseUnchanged(sid, files, dir, push.got);
+    send(conn, { type: 'asset-ok', pushId: id, reused: reused.length ? reused : undefined });
+    if (reused.length) log(`asset push ${id}: reused ${reused.length}/${files.size} unchanged files`);
+  }
+
+  /** 从上一批 liveDir 复用内容相同的文件到 staging；返回复用的 path 列表 */
+  function reuseUnchanged(sid, files, dir, got) {
+    let index;
+    try { index = JSON.parse(fs.readFileSync(filesFileOf(sid), 'utf8')); } catch { return []; }
+    const bySha = new Map();
+    for (const [p2, h] of Object.entries((index && index.files) || {})) {
+      if (!h) continue;
+      if (!bySha.has(h)) bySha.set(h, []);
+      bySha.get(h).push(p2);
+    }
+    const liveDir = liveDirOf(sid);
+    const reused = [];
+    for (const [p2, meta] of files) {
+      const cands = bySha.get(meta.sha8);
+      if (!cands) continue;
+      for (const old of cands) {
+        if (!safePath(old)) continue;
+        const src = path.join(liveDir, ...old.split('/'));
+        if (!src.startsWith(liveDir + path.sep)) continue;
+        try {
+          if (fs.statSync(src).size !== meta.size) continue;
+          fs.copyFileSync(src, path.join(dir, ...p2.split('/')));
+          got.set(p2, { fd: null, bytes: -1 });
+          reused.push(p2);
+          break;
+        } catch { /* 旧文件缺失/不可读：退回正常上传 */ }
+      }
+    }
+    return reused;
   }
   function putChunk(conn, p) {
     const push = pushes.get(String(p.pushId || ''));
@@ -185,6 +237,7 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     const chunk = fromB64(p.data);
     if (!Number.isSafeInteger(p.seq) || !chunk || chunk.length > CHUNK) { err(conn, 'asset-chunk', '帧字段非法'); return; }
     const rec = push.got.get(p.path) || { fd: null, bytes: 0 };
+    if (rec.bytes === -1) return;   // 已复用：忽略重复分片（兼容旧插件仍整包重发）
     if (rec.bytes !== seq * CHUNK) { err(conn, 'asset-seq', `乱序 ${p.path}@${seq}`); return; }
     try {
       if (!rec.fd) rec.fd = fs.openSync(path.join(push.dir, ...p.path.split('/')), 'a');
@@ -198,6 +251,7 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     const push = pushes.get(String(p.pushId || ''));
     if (!push || push.sid !== conn._fullSid) { err(conn, 'asset-push', '无此推送'); return; }
     const meta = push.files.get(String(p.path || '')); const rec = push.got.get(p.path);
+    if (rec && rec.bytes === -1) return;   // 已复用，无需收数据
     if (!meta || !rec || !rec.fd) { err(conn, 'asset-file', `缺数据 ${p.path}`); return; }
     try { fs.closeSync(rec.fd); } catch { /* ignore */ }
     rec.fd = null;
@@ -230,6 +284,10 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     const bytes = [...push.files.values()].reduce((a, f) => a + f.size, 0);
     const liveMeta = { version: String(p.version || push.version), files: push.files.size, bytes };
     try { fs.writeFileSync(metaFileOf(push.sid), JSON.stringify(liveMeta)); } catch { /* ignore */ }
+    // 记下本批 path→sha8：下一批推送时按内容复用未变文件（rev 变化不再整包重传）
+    const fileIndex = { files: {} };
+    for (const [p2, meta] of push.files) fileIndex.files[p2] = meta.sha8;
+    try { fs.writeFileSync(filesFileOf(push.sid), JSON.stringify(fileIndex)); } catch { /* ignore */ }
     liveMetas.set(push.sid, liveMeta);
     pushes.delete(id);
     log(`full-mode assets committed for ${push.sid}: v=${liveMeta.version} files=${liveMeta.files} bytes=${liveMeta.bytes}`);
@@ -244,7 +302,7 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
   }
 
   // ── HTTP 桥（手机 ↔ relay ↔ device）──
-  function bridgeHttp(req, res, url) {
+  function bridgeHttp(req, res, url, baseLen = FULL_BASE.length) {
     const sid = sidOfRequest(req);
     if (!sid) { res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"unpaired"}'); return; }
     const device = getDevice(sid);
@@ -275,9 +333,10 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
           finishHttp(reqId);
         }
       });
+      const relPath = baseLen > 0 ? url.pathname.slice(baseLen + 1) : url.pathname.slice(1);
       const payload = {
         type: 'http-req', reqId, method: req.method,
-        path: url.pathname.slice(FULL_BASE.length + 1),
+        path: relPath,
         query: url.search ? url.search.slice(1) : '',
         headers: pickReqHeaders(req.headers),
       };
@@ -439,11 +498,32 @@ export function setupFullMode({ dataDir, getDevice, WsConn, liveConns, tlsReady,
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 asset missing');
   }
   const isFullApiUpgrade = (pathname) => pathname.startsWith(FULL_BASE + '/api/');
+
+  /**
+   * 根路径白名单回源：插件的 client 用绝对路径（/workbuddy/status）请求本机 API，
+   * 在 relay 根上这些路径本来不存在。命中白名单且持有有效 rrm_full 时，复用同一条
+   * 出站隧道桥回设备（与 /remote/full/api/* 完全同一套流控与取消语义）。
+   * 只放行 HTTP；WS 升级不在白名单范围内（插件的 WS 仍应走 api/ 前缀）。
+   */
+  function handleRootProxy(req, res, url) {
+    if (!matchesRootProxy(url.pathname)) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 not found'); return;
+    }
+    let dec = '';
+    try { dec = decodeURIComponent(url.pathname); } catch { /* 非法编码交给下游 */ }
+    if (dec.split('/').includes('..') || url.pathname.split('/').includes('..')) {
+      res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' }).end('400 bad path'); return;
+    }
+    const sid = sidOfRequest(req);
+    if (!sid) { res.writeHead(401, { 'content-type': 'application/json' }).end('{"error":"unpaired"}'); return; }
+    if (!getDevice(sid)) { res.writeHead(503, { 'content-type': 'application/json' }).end('{"error":"device-offline"}'); return; }
+    bridgeHttp(req, res, url, 0);
+  }
   const info = () => ({
     devicesWithAssets: [...liveMetas.values()].filter((m) => m.version).length,
     assetVersions: [...new Set([...liveMetas.values()].map((m) => m.version).filter(Boolean))].length,
     pushes: pushes.size, termTokens: termTokens.size, httpPending: httpPending.size, wsBridges: wsBridges.size,
   });
 
-  return { handleHttp, isFullApiUpgrade, deviceAsset, deviceBridge, deviceOffline, issueTermToken, bridgeWs, info };
+  return { handleHttp, handleRootProxy, matchesRootProxy, isFullApiUpgrade, deviceAsset, deviceBridge, deviceOffline, issueTermToken, bridgeWs, info };
 }

@@ -12,6 +12,8 @@ services:
       # 防蹭用（必填）：设备注册口令，与 dsh 面板"设备注册口令"一致。
       # 用法：cp .env.example .env 后修改 .env
       - RELAY_REG_TOKEN=${RELAY_REG_TOKEN:?请先 cp .env.example .env 并设置口令}
+      # 根路径白名单回源（可选）：给用绝对路径的插件（/workbuddy/ 等），逗号分隔。
+      - RELAY_ROOT_PROXY=${RELAY_ROOT_PROXY:-}
     volumes:
       - ./data:/app/data    # 设备注册表持久化（删除该目录 = 全部设备重新配对）
 

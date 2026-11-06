@@ -437,31 +437,33 @@ assert.equal((await infoReq()).connected, true, '启用后 10s 内未重新连�
 const savedOn = JSON.parse(fs.readFileSync(path.join(toolsDir, 'remote-relay.json'), 'utf8'));
 assert.equal(savedOn.enabled, true, '启用状态未落盘');
 
-STEP(14, '指纹：index 的 ?rev= 变化不重推，资产内容真变才重推…');
+STEP(14, '指纹：rev 变化只重推 index+combo（assets 由 relay 复用），内容真变才重传…');
 const metaOf = (sid) => path.join(tmp, 'data', 'assets', sid, 'full.json');
 const metaVersion = () => JSON.parse(fs.readFileSync(metaOf(info2.sid), 'utf8')).version;
 const waitConnected = async () => {
   for (let i = 0; i < 100; i++) { if ((await infoReq()).connected) return; await sleep(100); }
   throw new Error('重连超时');
 };
+const appFile = path.join(tmp, 'data', 'assets', info2.sid, 'full', 'assets', 'app-1.js');
 const v0 = metaVersion();
-const m0 = fs.statSync(metaOf(info2.sid)).mtimeMs;
-fakeIndexRev = 'e2e2';   // 模拟 dsh 重启：只有 rev（mtime 派生）变了，内容一点没变
+fakeIndexRev = 'e2e2';   // 模拟 dsh 重启：只有 rev（mtime 派生）变了
 await postConfig({ enabled: false });
 await postConfig({ enabled: true });
 await waitConnected();
-await sleep(1000);
-assert.equal(metaVersion(), v0, '仅 rev 变化却触发了整包重推');
-assert.equal(fs.statSync(metaOf(info2.sid)).mtimeMs, m0, '仅 rev 变化却重写了中继资产');
+let v1 = v0;
+for (let i = 0; i < 100 && v1 === v0; i++) { await sleep(100); v1 = metaVersion(); }
+assert.notEqual(v1, v0, '仅 rev 变化未触发重推：relay 会停在旧 rev，手机端与 HMR 图混用');
+const idxFile = path.join(tmp, 'data', 'assets', info2.sid, 'full', 'index.html');
+assert.match(fs.readFileSync(idxFile, 'utf8'), /rev=e2e2/, 'relay 上的 index 未更新到新 rev');
+assert.equal(fs.readFileSync(appFile, 'utf8'), 'console.log("e2e asset")', '内容未变的 assets/ 被重传或损坏');
 
 assetBody = 'console.log("e2e asset v2")';   // 内容真变：必须重推
 await postConfig({ enabled: false });
 await postConfig({ enabled: true });
 await waitConnected();
-let v2 = v0;
-for (let i = 0; i < 100 && v2 === v0; i++) { await sleep(100); v2 = metaVersion(); }
-assert.notEqual(v2, v0, '资产内容变化未触发重推');
-const appFile = path.join(tmp, 'data', 'assets', info2.sid, 'full', 'assets', 'app-1.js');
+let v2 = v1;
+for (let i = 0; i < 100 && v2 === v1; i++) { await sleep(100); v2 = metaVersion(); }
+assert.notEqual(v2, v1, '资产内容变化未触发重推');
 assert.equal(fs.readFileSync(appFile, 'utf8'), 'console.log("e2e asset v2")', '重推后中继上的资产未更新');
 
 // ── 收尾 ─────────────────────────────────────────────────────────────────────

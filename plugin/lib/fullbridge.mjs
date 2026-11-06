@@ -424,7 +424,11 @@ export function createFullBridge(io) {
       const indexBufFinal = Buffer.from(indexHtml, 'utf8');
       // 先本地按内容算指纹（读本机、不上传），只有内容真的变了才推
       const { files, total, skipped } = await collectAssets(indexHtml, indexBufFinal, cookie, epoch);
-      const version = 'idx4-' + assetFingerprint(files) + (minimal ? '-k' : '');
+      // 版本 = 内容指纹 + index 原文哈希（含 rev）。rev 变了（dsh 重启/重装）也必须重推：
+      // relay 若停留在旧 rev 的 index，运行时 /plugins/events 的插件图与未命中回源都会带来
+      // 新 rev，同一插件出现两份 → slot 注册表被覆盖 → 白板（见 docs/TROUBLESHOOTING.zh.md）。
+      // relay 会按内容复用未变的文件，所以实际上行只有 index + combo，而非整包 24MB。
+      const version = 'idx5-' + assetFingerprint(files) + '-' + sha8(Buffer.from(indexHtml, 'utf8')) + (minimal ? '-k' : '');
       // 记录本轮清单（key → sha8）并留一份 index 快照：版本变了就能指出"谁变了"
       const manifest = { version, at: new Date().toISOString(), files: files.map((f) => [f.key, fingerprintHash(f), f.buf.length]) };
       try {
@@ -441,8 +445,11 @@ export function createFullBridge(io) {
         + ` (local ${version} / relay ${st.version || '无'})`);
       const pushId = 'p-' + Date.now().toString(36);
       send({ type: 'asset-begin', pushId, version, files: files.map((f) => ({ path: f.path, size: f.buf.length, sha8: sha8(f.buf) })) });
-      await waitReply('asset-ok', 20000);
+      const begun = await waitReply('asset-ok', 20000);
+      const reused = new Set(Array.isArray(begun.reused) ? begun.reused : []);
+      if (reused.size) log(`full-mode push: ${reused.size}/${files.length} 个文件由 relay 复用（内容未变）`);
       for (const f of files) {
+        if (reused.has(f.path)) continue;   // relay 上已有同内容文件，不再上行
         const totalChunks = Math.max(1, Math.ceil(f.buf.length / CHUNK));
         for (let seq = 0; seq < totalChunks; seq++) {
           send({ type: 'asset-put', pushId, path: f.path, seq, total: totalChunks, data: f.buf.subarray(seq * CHUNK, (seq + 1) * CHUNK).toString('base64') });

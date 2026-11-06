@@ -252,6 +252,10 @@ export function startRelay(opts = {}) {
   const tlsCert = opts.tlsCert ?? process.env.RELAY_TLS_CERT ?? '';
   const tlsKey = opts.tlsKey ?? process.env.RELAY_TLS_KEY ?? '';
   const resolvedDataDir = path.resolve(opts.dataDir ?? process.env.RELAY_DATA_DIR ?? path.join(__dirname, 'data'));
+  // 根路径白名单回源（E1）：逗号分隔的前缀，如 "/workbuddy/,/dsh-whale/"。
+  // 给用绝对路径请求本机 API 的插件用；默认空 = 不额外暴露任何根路径。
+  const rootProxy = String(opts.rootProxy ?? process.env.RELAY_ROOT_PROXY ?? '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
   const registry = new Registry(path.join(resolvedDataDir, 'devices.json'));
   const guard = new FailGuard();
   // 注册口令：设置后，新设备（未注册的 sid）必须携带匹配的 regToken 才能注册，
@@ -270,7 +274,9 @@ export function startRelay(opts = {}) {
     getDevice: (sid) => slots.get(sid)?.device || null,   // 只读，不创建空槽
     WsConn, liveConns,
     tlsReady: !!(tlsCert && tlsKey), log,
+    rootProxy,
   });
+  if (rootProxy.length) log(`根路径白名单回源：${rootProxy.join(', ')}`);
 
   function httpHandler(req, res) {
     const url = new URL(req.url, 'http://x');
@@ -278,6 +284,7 @@ export function startRelay(opts = {}) {
     if (pathname === '/healthz') { res.writeHead(200, { 'content-type': 'text/plain' }).end('ok'); return; }
     if (pathname === '/remote/full-auth' || pathname === '/remote/full' || pathname.startsWith('/remote/full/')) { full.handleHttp(req, res, url); return; }
     if (pathname === '/remote' || pathname.startsWith('/remote/')) { serveStatic(req, res, pathname); return; }
+    if (full.matchesRootProxy(pathname)) { full.handleRootProxy(req, res, url); return; }
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('404 not found');
   }
 

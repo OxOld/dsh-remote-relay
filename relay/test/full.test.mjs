@@ -43,7 +43,7 @@ const httpReq = (method, p, { headers = {}, body = null } = {}) => new Promise((
 
 before(async () => {
   fs.mkdirSync(path.join(tmp, 'public'), { recursive: true });
-  relay = await startRelay({ port: 0, publicDir: path.join(tmp, 'public'), dataDir: path.join(tmp, 'data') });
+  relay = await startRelay({ port: 0, publicDir: path.join(tmp, 'public'), dataDir: path.join(tmp, 'data'), rootProxy: ['/workbuddy/'] });
 });
 
 after(async () => {
@@ -181,6 +181,70 @@ test('asset 推送落盘、index 改写服务、immutable 缓存、非法路径�
   const fallback = await fbPromise;
   assert.equal(fallback.status, 200);
   assert.equal(fallback.body.toString(), 'console.log("chunk")');
+  await d.close();
+});
+
+// ── 根路径白名单回源（E1：给绝对路径插件用）──
+test('根路径白名单：无 cookie 401、白名单外 404、命中则桥回设备', async () => {
+  const dev = await authed('device');
+  const d = dev.c;
+  const cookie = globalThis.__fullCookie;
+
+  const anon = await httpReq('GET', '/workbuddy/status');
+  assert.equal(anon.status, 401);
+
+  const outside = await httpReq('GET', '/not-allowed/x', { headers: { cookie } });
+  assert.equal(outside.status, 404);
+
+  const p = httpReq('GET', '/workbuddy/status?quota=1', { headers: { cookie } });
+  const br = await d.nextData();
+  assert.equal(br.payload.type, 'http-req');
+  assert.equal(br.payload.path, 'workbuddy/status');   // 根路径不带 /remote/full 前缀
+  assert.equal(br.payload.query, 'quota=1');
+  d.send({ type: 'data', payload: { type: 'http-res-head', reqId: br.payload.reqId, status: 200, headers: { 'content-type': 'application/json' } } });
+  d.send({ type: 'data', payload: { type: 'http-res-chunk', reqId: br.payload.reqId, data: Buffer.from('{"ok":true}').toString('base64') } });
+  d.send({ type: 'data', payload: { type: 'http-res-end', reqId: br.payload.reqId } });
+  const res = await p;
+  assert.equal(res.status, 200);
+  assert.equal(res.body.toString(), '{"ok":true}');
+  await d.close();
+});
+
+// ── A1：rev 变化重推时，内容未变的文件由 relay 复用 ──
+test('rev 变化重推：asset-ok 返回 reused，未变文件无需上行', async () => {
+  const dev = await authed('device');
+  const d = dev.c;
+  const sendP = (payload) => d.send({ type: 'data', payload });
+  const sha8 = (b) => crypto.createHash('sha256').update(b).digest('hex').slice(0, 8);
+  const cookie = globalThis.__fullCookie;
+
+  const index2 = Buffer.from('<!doctype html><html><head><link href="/manifest.webmanifest" rel="manifest"><script src="./assets/app-1.js"></script></head><body>rev2</body></html>');
+  const appJs = Buffer.from('console.log("app v1")');          // 与上一批内容相同
+  const manifest = Buffer.from('{"name":"dsh"}');              // 与上一批内容相同
+  const files = [
+    { path: 'index.html', buf: index2 },
+    { path: 'assets/app-1.js', buf: appJs },
+    { path: 'manifest.webmanifest', buf: manifest },
+  ];
+  const pushId = 'push-rev2';
+  sendP({ type: 'asset-begin', pushId, version: 'v2-hash', files: files.map((f) => ({ path: f.path, size: f.buf.length, sha8: sha8(f.buf) })) });
+  const ack = (await d.nextData()).payload;
+  assert.equal(ack.type, 'asset-ok');
+  assert.deepEqual(new Set(ack.reused || []), new Set(['assets/app-1.js', 'manifest.webmanifest']));
+
+  // 只发变化的 index，其余靠复用；commit 仍应成功
+  sendP({ type: 'asset-put', pushId, path: 'index.html', seq: 0, total: 1, data: index2.toString('base64') });
+  sendP({ type: 'asset-end', pushId, path: 'index.html' });
+  sendP({ type: 'asset-commit', pushId, version: 'v2-hash' });
+  const done = (await d.nextData()).payload;
+  assert.equal(done.type, 'asset-committed');
+  assert.equal(done.files, 3);
+
+  const page = await httpReq('GET', '/remote/full/', { headers: { cookie } });
+  assert.equal(page.status, 200);
+  assert.match(page.body.toString(), /rev2/);
+  const js = await httpReq('GET', '/remote/full/assets/app-1.js', { headers: { cookie } });
+  assert.equal(js.body.toString(), 'console.log("app v1")', '复用后的文件内容不对');
   await d.close();
 });
 

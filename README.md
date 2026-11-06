@@ -31,6 +31,7 @@ flowchart TB
 ```
 docs/PROTOCOL.md          三方协议契约（relay/UI 只按它实现，永不 import dsh）
 docs/DESIGN.zh.md         架构决策记录（为什么弃用全量代理；为何移除轻量 UI）
+docs/TROUBLESHOOTING.zh.md 白板/配对/资产同步的排查手册与加固方案（含 2026-11-06 事故复盘）
 relay/relay.mjs           中继服务（单文件，零依赖，Node ≥ 20）
 relay/public/             配对网关页（/remote/，配对 → 换 cookie → 跳官方界面）
 relay/full.mjs            官方 UI 托管：资产落盘 + cookie 门禁 + HTTP/WS 桥接（由 relay.mjs 挂载）
@@ -50,9 +51,13 @@ plugin/lib/ws.mjs         零依赖 WebSocket 客户端
   会话、对话、终端、插件设置、工具调用批准，全部原生支持
 - **总开关（启用 / 停止）**：面板顶部一键启停——停止立即断开中继并中止资产推送，之后零上行；
   状态持久化，重启 dsh 沿用上次选择；启用状态下启动只做指纹比对，UI 没变就不重传
-- 资产推送：插件按**落盘字节的内容指纹**判断，界面真的变了才推（首次 ~25MB，之后每次启动只做本地比对，
-  零上传；index 里的 `?rev=` 是 mtime 派生值、每次启动都变，指纹已归一化）；
+- 资产推送：插件按**落盘字节的内容指纹 + index rev** 判断，界面真的变了才推（首次 ~25MB，
+  之后每次启动只做本地比对，零上传；`index` 里的 `?rev=` 是 mtime 派生值、每次启动都变，
+  版本号里带上它避免中继停留在旧 rev 与 HMR 图混用；没变的 `assets/` 由中继按内容复用，
+  实际每次上行 ~11MB）；
   为何不由镜像内置这份 UI，见 [docs/DESIGN.zh.md](docs/DESIGN.zh.md)
+- **根路径白名单回源**（可选）：给用绝对路径的插件（如 `/workbuddy/*`）配 `RELAY_ROOT_PROXY`，
+  手机端也能正常调用，见 [relay/deploy/DEPLOY.zh.md](relay/deploy/DEPLOY.zh.md)
 - HTTP/WS 桥接：手机对官方 UI 的所有 API 调用与 `/api/remote.mux` WebSocket 经出站隧道桥回家里
 - **精简官方界面**（可选）：隐藏设置/插件/工作区创建，只留会话与对话
 - **手机批准工具调用**（可选）：`approval/request` 瀑布接入；手机超时自动回退桌面，绝不阻塞本地
@@ -71,7 +76,7 @@ plugin/lib/ws.mjs         零依赖 WebSocket 客户端
 ## 测试
 
 ```bash
-# 中继（WS 编解码/鉴权/桥接/限速/分片/心跳，22 项）
+# 中继（WS 编解码/鉴权/桥接/限速/分片/心跳/根路径回源/资产复用，24 项）
 node --test relay/test/relay.test.mjs relay/test/full.test.mjs
 # 投影器单测（遗留协议层）
 node --test plugin/test/projector.test.mjs

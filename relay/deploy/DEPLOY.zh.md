@@ -185,6 +185,26 @@ Environment=RELAY_REG_TOKEN=换成一串随机口令
 安全注意：官方 UI 入口有 cookie 门禁——cookie 绑定配对会话（HttpOnly，7 天有效），
 relay 重启后网关页会自动重新配对换新 cookie；切勿把 `/remote/full/` 直接暴露给未配对访客（默认已有门禁）。
 
+## 6.2 让绝对路径插件在手机端也能用（可选）
+
+有些 dsh 插件把本机路由挂在根路径上（如 `workbuddy-to-dsh` 的 `/workbuddy/status`、
+`dsh-whale` 注入的 `/dsh-whale/widget.js`）。官方 UI 托管在 `/remote/full/` 子路径下，
+这些请求会落到 relay 根上 404，手机端对应面板不可用。
+
+给 relay 配一个白名单即可把它们经同一条隧道桥回本机（仍要求已配对的 `rrm_full` cookie）：
+
+```bash
+RELAY_ROOT_PROXY=/workbuddy/,/dsh-whale/     # 逗号分隔前缀
+```
+
+```yaml
+# docker-compose.yml 的 environment 里加
+- RELAY_ROOT_PROXY=${RELAY_ROOT_PROXY:-}
+```
+
+只放你信任的插件前缀；`/remote*`、`/healthz` 永远不会被匹配。不配置时行为不变（404）。
+插件若用 WebSocket，仍应走 `/remote/full/api/` 前缀（白名单只覆盖 HTTP）。
+
 ## 7. 数据与安全
 
 - `data/devices.json`：已注册设备（sid → hash），删除文件 = 全部设备重新配对。
